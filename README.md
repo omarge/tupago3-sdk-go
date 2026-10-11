@@ -79,12 +79,16 @@ A complete, dependency-free consumer application lives at `../tupago3-sdk-go-con
   rejected). Transport credentials are derived solely from `Config.TLS` /
   `Config.Insecure` and are appended last and authoritatively — no public option
   can downgrade TLS to plaintext or override the peer's transport security.
-  Tests inject an in-memory dialer via the test-only `Config.TestDialer`, which
-  carries no transport credentials.
+  Server-certificate verification is ALWAYS enforced: `InsecureSkipVerify` is not
+  supported by the public API and any attempt to disable it (helper or raw
+  `*tls.Config`) is rejected. Private CAs and a verified `ServerName` are
+  supported. Tests use an in-process, real-loopback server rather than a
+  configurable public dialer, so no caller can redirect the connection to a
+  remote plaintext peer.
 * **JWT:** injected per RPC via `PerRPCCredentials`. Tokens are never written to
   logs or returned in errors.
-* **Create safety:** no `InsecureSkipVerify` for production; `Create*` RPCs are
-  invoked exactly once; transient post-send failures map to `UnknownOutcomeError`.
+* **Create safety:** `Create*` RPCs are invoked exactly once; transient post-send
+  failures map to `UnknownOutcomeError`.
 
 ## Monetary validation
 

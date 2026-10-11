@@ -2,9 +2,10 @@ package client_test
 
 import (
 	"context"
-	"fmt"
+	"crypto/tls"
 	"net"
 	"os/exec"
+	"reflect"
 	"testing"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/omarge/tupago3-sdk-go/auth"
 	"github.com/omarge/tupago3-sdk-go/client"
@@ -39,239 +39,305 @@ func reqHasBearer(ctx context.Context) bool {
 	return false
 }
 
-// plainBufConn is an in-memory bufconn server that serves PLAINTEXT (no TLS).
-// Used only to prove loopback plaintext still works when the SDK's policy allows
-// it, and that a custom dialer can never downgrade TLS for a remote target.
-type plainBufConn struct {
-	srv *grpc.Server
-	lis *bufconn.Listener
-}
-
-func startPlaintextBufConn(srv v1.PaymentServiceServer) *plainBufConn {
-	lis := bufconn.Listen(1 << 20)
-	s := grpc.NewServer() // plaintext
-	v1.RegisterPaymentServiceServer(s, srv)
-	go func() { _ = s.Serve(lis) }()
-	return &plainBufConn{srv: s, lis: lis}
-}
-
-func (p *plainBufConn) dialer() func(context.Context, string) (net.Conn, error) {
-	return func(ctx context.Context, _ string) (net.Conn, error) {
-		return p.lis.DialContext(ctx)
-	}
-}
-
-func (p *plainBufConn) stop() {
-	p.srv.Stop()
-	_ = p.lis.Close()
-}
-
-// hardeningRecorder is a server that optionally requires a Bearer token and that
-// fails CreateQr with Unavailable so the SDK's UnknownOutcome mapping can be
-// exercised. It records the number of CreateQr attempts (at-most-once check).
-type hardeningRecorder struct {
+// bearerRecorder optionally requires a Bearer token on GetCliente.
+type bearerRecorder struct {
 	v1.UnimplementedPaymentServiceServer
-	createCalls int
 	requireAuth bool
 }
 
-func (s *hardeningRecorder) GetCliente(ctx context.Context, req *v1.GetClienteRequest) (*v1.ClientePerfil, error) {
+func (s *bearerRecorder) GetCliente(ctx context.Context, req *v1.GetClienteRequest) (*v1.ClientePerfil, error) {
 	if s.requireAuth && !reqHasBearer(ctx) {
 		return nil, status.Error(codes.Unauthenticated, "missing bearer")
 	}
 	return &v1.ClientePerfil{Cliente: &v1.Cliente{Id: req.Id, Nombre: "ok"}}, nil
 }
 
-func (s *hardeningRecorder) CreateQr(ctx context.Context, req *v1.CreateQrRequest) (*v1.JsonResponse, error) {
-	s.createCalls++
-	if s.requireAuth && !reqHasBearer(ctx) {
-		return nil, status.Error(codes.Unauthenticated, "missing bearer")
+// startPlaintextServer starts an in-process gRPC server over a REAL loopback TCP
+// listener using plaintext (no TLS). Used only to prove loopback plaintext is
+// still sanctioned; it can never be reached by a non-loopback target because the
+// SDK dials the declared Config.Target directly (no public dialer).
+func startPlaintextServer(t *testing.T, srv v1.PaymentServiceServer) (string, func()) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	s := grpc.NewServer() // plaintext, loopback only
+	v1.RegisterPaymentServiceServer(s, srv)
+	go func() { _ = s.Serve(lis) }()
+	return lis.Addr().String(), func() { s.Stop(); _ = lis.Close() }
+}
+
+// assertPublicAPIAbsent verifies that a public symbol is no longer exposed by a
+// package, using `go doc` (compile-time API surface evidence).
+func assertPublicAPIAbsent(t *testing.T, pkg, sym string) {
+	out, err := exec.Command("go", "doc", pkg).CombinedOutput()
+	require.NoError(t, err, "go doc must succeed for %s", pkg)
+	assert.NotContains(t, string(out), sym,
+		"public API %s must NOT expose %q", pkg, sym)
+}
+
+// isDialerFunc reports whether rt matches func(context.Context, string)(net.Conn,error).
+func isDialerFunc(rt reflect.Type) bool {
+	if rt.Kind() != reflect.Func || rt.NumIn() != 2 || rt.NumOut() != 1 {
+		return false
 	}
-	return nil, status.Error(codes.Unavailable, "injected")
-}
-
-// T01: A non-loopback target with no TLS (and no Insecure) is rejected before any
-// dialer runs. There is no public option to open a plaintext channel to a remote.
-func TestT01RemotePlaintextRejected(t *testing.T) {
-	_, err := client.NewClient(context.Background(), &client.Config{
-		Target:      "198.51.100.1:443",
-		Credentials: auth.StaticTokenProvider(testToken),
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TLS required")
-}
-
-// T02: Even a test-injected dialer (the only dialer injection path remaining)
-// cannot bypass the TLS requirement for a remote target. The dialer must not be
-// invoked when the configuration is rejected.
-func TestT02PassthroughRemoteDialerRejected(t *testing.T) {
-	dialed := 0
-	badDialer := func(ctx context.Context, _ string) (net.Conn, error) {
-		dialed++
-		return nil, fmt.Errorf("dialer must not run")
+	if rt.In(0) != reflect.TypeOf((*context.Context)(nil)).Elem() {
+		return false
 	}
-	_, err := client.NewClient(context.Background(), &client.Config{
-		Target:      "198.51.100.1:443",
-		Credentials: auth.StaticTokenProvider(testToken),
-		TestDialer:  badDialer,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TLS required")
-	assert.Equal(t, 0, dialed, "dialer must not run when TLS is required for a remote target")
+	if rt.Out(0) != reflect.TypeOf((*net.Conn)(nil)).Elem() {
+		return false
+	}
+	return true
 }
 
-// T03: A custom dialer reaches a TLS server, but the SDK enforces its OWN TLS
-// config. A CA that does not match the server's certificate fails the handshake
-// closed — the dialer cannot override or disable TLS.
-func TestT03CustomDialerCannotOverrideTLS(t *testing.T) {
-	b := startBufConn(NewMockServer())
+// SEC-GO-01: server identity verification cannot be turned off. A consumer that
+// sets InsecureSkipVerify=true via the SDK's own TLSConfig is rejected.
+func TestSEC01RemoteTLSWithoutCertificateVerificationRejected(t *testing.T) {
+	b := startTestServer(t, NewMockServer())
 	defer b.stop()
-	otherCert, _ := genTestCert() // a DIFFERENT CA than the server's
-	tlsCfg, err := security.NewTLSConfig(security.WithCACertPEM(otherCert), security.WithServerName("localhost"))
+	tlsCfg, err := security.NewTLSConfig(
+		security.WithCACertPEM(b.certPEM),
+		security.WithServerName("localhost"),
+	)
 	require.NoError(t, err)
-	// With a mismatched CA the TLS handshake never completes, so the connection
-	// fails closed during connect (the dialer cannot disable TLS).
-	c, err := client.NewClient(context.Background(), &client.Config{
-		Target:         "203.0.113.1:443", // declared remote
-		TLS:            tlsCfg,
-		Credentials:    auth.StaticTokenProvider(testToken),
-		TestDialer:     b.dialer(),
-		ConnectTimeout: 2 * time.Second,
-	})
-	require.Error(t, err, "TLS verification with a wrong CA must fail closed")
-	assert.NotContains(t, err.Error(), "TLS required", "config was accepted; failure is at the TLS transport layer")
-	assert.Nil(t, c)
-}
+	tlsCfg.Config.InsecureSkipVerify = true // attempt to disable verification
 
-// T04: Insecure (plaintext transport credentials) is rejected for any non-loopback
-// target, so the SDK never constructs an insecure transport for a remote peer.
-func TestT04InsecureTransportCredentialsRejectedNonLoopback(t *testing.T) {
-	_, err := client.NewClient(context.Background(), &client.Config{
-		Target:      "198.51.100.1:443",
-		Insecure:    true,
-		Credentials: auth.StaticTokenProvider(testToken),
-		TestDialer:  func(ctx context.Context, _ string) (net.Conn, error) { return nil, fmt.Errorf("x") },
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "plaintext not permitted")
-}
-
-// T05: Loopback plaintext remains permitted (policy preserved) and works through a
-// test-injected dialer, but ONLY because the declared target is loopback.
-func TestT05LoopbackPlaintextAllowed(t *testing.T) {
-	p := startPlaintextBufConn(NewMockServer())
-	defer p.stop()
-	c, err := client.NewClient(context.Background(), &client.Config{
-		Target:      "127.0.0.1:50051", // loopback
-		Credentials: auth.StaticTokenProvider(testToken),
-		TestDialer:  p.dialer(),
-	})
-	require.NoError(t, err)
-	defer c.Close()
-	_, err = c.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
-	require.NoError(t, err)
-}
-
-// T06: A declared remote target with a trusted CA over TLS succeeds — the secure
-// path is fully functional through the test dialer.
-func TestT06RemoteTLSVerifiedWithTrustedCA(t *testing.T) {
-	b := startBufConn(NewMockServer())
-	defer b.stop()
-	tlsCfg, err := security.NewTLSConfig(security.WithCACertPEM(b.certPEM), security.WithServerName("localhost"))
-	require.NoError(t, err)
-	c, err := client.NewClient(context.Background(), &client.Config{
-		Target:      "203.0.113.1:443", // declared remote
+	_, err = client.NewClient(context.Background(), &client.Config{
+		Target:      b.addr,
 		TLS:         tlsCfg,
 		Credentials: auth.StaticTokenProvider(testToken),
-		TestDialer:  b.dialer(),
 	})
-	require.NoError(t, err)
-	defer c.Close()
-	_, err = c.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
-	require.NoError(t, err, "TLS with a trusted CA must succeed")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "InsecureSkipVerify",
+		"disabling certificate verification must be rejected")
 }
 
-// T07: A declared remote target with TLS but no trusted CA fails closed (the
-// self-signed server certificate is not in the system roots).
-func TestT07RemoteTLSRejectedWithoutTrustedCA(t *testing.T) {
-	b := startBufConn(NewMockServer())
+// SEC-GO-01: the public helper that used to skip verification is gone from the
+// production API surface.
+func TestSEC02InsecureSkipVerifyRejected(t *testing.T) {
+	assertPublicAPIAbsent(t, "github.com/omarge/tupago3-sdk-go/security", "WithInsecureSkipVerify")
+}
+
+// SEC-GO-01: a consumer-supplied raw *tls.Config with InsecureSkipVerify=true
+// (bypassing NewTLSConfig) is also rejected — the guard is not limited to the
+// removed helper.
+func TestSEC03CustomTLSConfigCannotDisableVerification(t *testing.T) {
+	b := startTestServer(t, NewMockServer())
+	defer b.stop()
+	cfg := &security.TLSConfig{
+		Config: &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true,
+			ServerName:         "localhost",
+		},
+	}
+	_, err := client.NewClient(context.Background(), &client.Config{
+		Target:      b.addr,
+		TLS:         cfg,
+		Credentials: auth.StaticTokenProvider(testToken),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "InsecureSkipVerify",
+		"a raw tls.Config disabling verification must be rejected")
+}
+
+// SEC-GO-01: ServerName mismatch fails certificate verification (fail-closed).
+func TestSEC04ServerNameMismatchRejected(t *testing.T) {
+	b := startTestServer(t, NewMockServer())
+	defer b.stop()
+	tlsCfg, err := security.NewTLSConfig(
+		security.WithCACertPEM(b.certPEM),
+		security.WithServerName("wrong.example.com"),
+	)
+	require.NoError(t, err)
+	_, err = client.NewClient(context.Background(), &client.Config{
+		Target:         b.addr,
+		TLS:            tlsCfg,
+		Credentials:    auth.StaticTokenProvider(testToken),
+		ConnectTimeout: 2 * time.Second,
+	})
+	require.Error(t, err, "hostname mismatch must fail certificate verification")
+	assert.NotContains(t, err.Error(), "TLS required")
+	assert.NotContains(t, err.Error(), "InsecureSkipVerify")
+}
+
+// SEC-GO-01: an untrusted CA chain fails verification (fail-closed).
+func TestSEC05UntrustedCARejected(t *testing.T) {
+	b := startTestServer(t, NewMockServer())
 	defer b.stop()
 	tlsCfg, err := security.NewTLSConfig() // no CA -> system roots only
 	require.NoError(t, err)
-	// Without a trusted CA the handshake fails closed during connect.
-	c, err := client.NewClient(context.Background(), &client.Config{
-		Target:         "203.0.113.1:443",
+	_, err = client.NewClient(context.Background(), &client.Config{
+		Target:         b.addr,
 		TLS:            tlsCfg,
 		Credentials:    auth.StaticTokenProvider(testToken),
-		TestDialer:     b.dialer(),
 		ConnectTimeout: 2 * time.Second,
 	})
 	require.Error(t, err, "untrusted server certificate must fail closed")
-	assert.NotContains(t, err.Error(), "TLS required", "config was accepted; failure is at the TLS transport layer")
-	assert.Nil(t, c)
+	assert.NotContains(t, err.Error(), "TLS required")
+	assert.NotContains(t, err.Error(), "InsecureSkipVerify")
 }
 
-// T08: The JWT Bearer is delivered over the TLS transport (not logged, not
-// stripped). A server requiring the token accepts it; an empty token is rejected.
-func TestT08JWTBearerPreservedWithTLS(t *testing.T) {
-	b := startBufConn(&hardeningRecorder{requireAuth: true})
+// SEC-GO-01: a trusted CA + correct ServerName authenticates the server and the
+// RPC succeeds (verified TLS, not just encryption).
+func TestSEC06TrustedCAAccepted(t *testing.T) {
+	b := startTestServer(t, NewMockServer())
 	defer b.stop()
-	tlsCfg, err := security.NewTLSConfig(security.WithCACertPEM(b.certPEM), security.WithServerName("localhost"))
+	tlsCfg, err := security.NewTLSConfig(
+		security.WithCACertPEM(b.certPEM),
+		security.WithServerName("localhost"),
+	)
 	require.NoError(t, err)
-
 	c, err := client.NewClient(context.Background(), &client.Config{
-		Target:      "203.0.113.1:443",
+		Target:      b.addr,
 		TLS:         tlsCfg,
-		Credentials: auth.StaticTokenProvider("good-token"),
-		TestDialer:  b.dialer(),
+		Credentials: auth.StaticTokenProvider(testToken),
 	})
 	require.NoError(t, err)
 	defer c.Close()
 	_, err = c.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
-	require.NoError(t, err, "bearer token must be delivered over TLS")
+	require.NoError(t, err, "verified TLS with trusted CA must succeed")
+}
+
+// SEC-GO-02: a loopback plaintext target (the only sanctioned plaintext path)
+// connects to the declared address directly; there is no public dialer that could
+// redirect it to a remote plaintext peer.
+func TestSEC07DeclaredLoopbackCannotRedirectPlaintextViaPublicAPI(t *testing.T) {
+	addr, stop := startPlaintextServer(t, NewMockServer())
+	defer stop()
+	c, err := client.NewClient(context.Background(), &client.Config{
+		Target:      addr, // loopback, plaintext
+		Insecure:    true,
+		Credentials: auth.StaticTokenProvider(testToken),
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	_, err = c.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
+	require.NoError(t, err, "loopback plaintext must connect to the declared target only")
+}
+
+// SEC-GO-02: the public Config exposes no dialer field of any kind, so a caller
+// cannot inject a connection dialer that returns remote plaintext TCP conns.
+func TestSEC08PublicConfigCannotInjectRemoteDialer(t *testing.T) {
+	ct := reflect.TypeOf(client.Config{})
+	for i := 0; i < ct.NumField(); i++ {
+		f := ct.Field(i)
+		assert.NotEqual(t, "TestDialer", f.Name, "Config must not expose a public dialer field")
+		assert.False(t, isDialerFunc(f.Type),
+			"Config field %s must not be a connection dialer func", f.Name)
+	}
+	assertPublicAPIAbsent(t, "github.com/omarge/tupago3-sdk-go/client", "TestDialer")
+}
+
+// SEC-GO-02: a non-loopback target without TLS is rejected at configuration time
+// (before any dial), so no remote plaintext channel can open.
+func TestSEC09RemotePlaintextRejectedBeforeDial(t *testing.T) {
+	_, err := client.NewClient(context.Background(), &client.Config{
+		Target:      "198.51.100.1:443",
+		Credentials: auth.StaticTokenProvider(testToken),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TLS required")
+}
+
+// SEC-GO-02: loopback plaintext remains permitted (regression of the sanctioned
+// dev/backend path).
+func TestSEC10LoopbackPlaintextStillAllowed(t *testing.T) {
+	addr, stop := startPlaintextServer(t, NewMockServer())
+	defer stop()
+	c, err := client.NewClient(context.Background(), &client.Config{
+		Target:      addr,
+		Insecure:    true,
+		Credentials: auth.StaticTokenProvider(testToken),
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	_, err = c.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
+	require.NoError(t, err)
+}
+
+// TLS identity and JWT are independent properties: the Bearer is delivered over
+// authenticated TLS, and a missing Bearer is rejected by the server.
+func TestSEC11JWTPreservedOnAuthenticatedTLS(t *testing.T) {
+	b := startTestServer(t, &bearerRecorder{requireAuth: true})
+	defer b.stop()
+	tlsCfg, err := security.NewTLSConfig(
+		security.WithCACertPEM(b.certPEM),
+		security.WithServerName("localhost"),
+	)
+	require.NoError(t, err)
+
+	c, err := client.NewClient(context.Background(), &client.Config{
+		Target:      b.addr,
+		TLS:         tlsCfg,
+		Credentials: auth.StaticTokenProvider("good-token"),
+	})
+	require.NoError(t, err)
+	defer c.Close()
+	_, err = c.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
+	require.NoError(t, err, "bearer token must be delivered over authenticated TLS")
 
 	bad, err := client.NewClient(context.Background(), &client.Config{
-		Target:      "203.0.113.1:443",
+		Target:      b.addr,
 		TLS:         tlsCfg,
 		Credentials: auth.StaticTokenProvider(""),
-		TestDialer:  b.dialer(),
 	})
 	require.NoError(t, err)
 	defer bad.Close()
 	_, err = bad.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
 	require.Error(t, err)
-	assert.True(t, errors.HasGRPCCode(err, codes.Unauthenticated), "missing bearer must be rejected over TLS")
+	assert.True(t, errors.HasGRPCCode(err, codes.Unauthenticated),
+		"missing bearer must be rejected over authenticated TLS")
 }
 
-// T09: The existing bufconn-based client (now TLS) still exercises the RPCs.
-func TestT09BufconnTLSStillPasses(t *testing.T) {
-	b := startBufConn(NewMockServer())
+// Financial invariant preserved: CreateQr is attempted exactly once and a
+// transient post-send failure maps to a non-retryable UnknownOutcome.
+func TestSEC12NoRetryCreateQrPreserved(t *testing.T) {
+	srv := NewMockServer()
+	srv.FailTimes("CreateQr", 5, codes.Unavailable)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
-	_, err := c.GetCliente(context.Background(), &v1.GetClienteRequest{Id: 1})
-	require.NoError(t, err)
-}
-
-// T10/T11/T12: CreateQr is attempted exactly once and a transient post-send
-// failure maps to a non-retryable UnknownOutcome.
-func TestT10T11T12CreateUnknownOutcomeNonRetryable(t *testing.T) {
-	rec := &hardeningRecorder{}
-	b := startBufConn(rec)
-	defer b.stop()
-	c := newTestClient(t, b, testToken)
-	defer c.Close()
-
-	_, err := c.CreateQr(context.Background(), &v1.CreateQrRequest{IdCuenta: 1, Monto: 10, IdempotencyKey: "id-1"})
+	_, err := c.CreateQr(context.Background(), &v1.CreateQrRequest{
+		IdCuenta: 1, Monto: 10, IdempotencyKey: "sec12",
+	})
 	require.Error(t, err)
-	assert.Equal(t, 1, rec.createCalls, "CreateQr must be attempted exactly once (T10)")
-	assert.True(t, errors.IsUnknownOutcome(err), "transient failure must map to UnknownOutcome (T11)")
-	assert.False(t, errors.IsRetryable(err), "UnknownOutcome must not be retryable (T12)")
+	assert.Equal(t, 1, srv.Calls("CreateQr"), "CreateQr must be attempted exactly once")
 }
 
-// T13: The independent consumer module (public-API only) still builds and passes
-// after the API change. It depends on the local SDK via a go.mod replace.
-func TestT13ExternalConsumerBuildsAndPasses(t *testing.T) {
+func TestSEC13NoRetryCreateTelefonicoPreserved(t *testing.T) {
+	srv := NewMockServer()
+	srv.FailTimes("CreateTelefonico", 5, codes.Unavailable)
+	b := startTestServer(t, srv)
+	defer b.stop()
+	c := newTestClient(t, b, testToken)
+	defer c.Close()
+	_, err := c.CreateTelefonico(context.Background(), &v1.CreateTelefonicoRequest{
+		Key: "k", Monto: 10, IdempotencyKey: "sec13",
+	})
+	require.Error(t, err)
+	assert.Equal(t, 1, srv.Calls("CreateTelefonico"), "CreateTelefonico must be attempted exactly once")
+}
+
+func TestSEC14UnknownOutcomePreserved(t *testing.T) {
+	srv := NewMockServer()
+	srv.FailTimes("CreateQr", 1, codes.Unavailable)
+	b := startTestServer(t, srv)
+	defer b.stop()
+	c := newTestClient(t, b, testToken)
+	defer c.Close()
+	_, err := c.CreateQr(context.Background(), &v1.CreateQrRequest{
+		IdCuenta: 1, Monto: 10, IdempotencyKey: "sec14",
+	})
+	require.Error(t, err)
+	assert.True(t, errors.IsUnknownOutcome(err), "UNAVAILABLE on sent Create -> UnknownOutcome")
+	assert.False(t, errors.IsRetryable(err), "UnknownOutcome must not be retryable")
+	assert.Equal(t, 1, srv.Calls("CreateQr"))
+}
+
+// The independent consumer module (public API only) still builds and passes
+// after removing WithInsecureSkipVerify and TestDialer.
+func TestSEC15ExternalConsumerBuildAndRuntimeGREEN(t *testing.T) {
 	if testing.Short() {
 		t.Skip("external consumer verification skipped in short mode")
 	}

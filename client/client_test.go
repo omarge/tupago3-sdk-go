@@ -24,7 +24,7 @@ import (
 
 const testToken = "eyJhbGciOiJIUzI1NiJ9.test-token"
 
-func newTestClient(t *testing.T, b *bufConnServer, token string, opts ...func(*client.Config)) *client.PaymentClient {
+func newTestClient(t *testing.T, b *testServer, token string, opts ...func(*client.Config)) *client.PaymentClient {
 	t.Helper()
 	tlsCfg, err := security.NewTLSConfig(
 		security.WithCACertPEM(b.certPEM),
@@ -32,10 +32,9 @@ func newTestClient(t *testing.T, b *bufConnServer, token string, opts ...func(*c
 	)
 	require.NoError(t, err)
 	cfg := &client.Config{
-		Target:      "passthrough:///bufnet",
+		Target:      b.addr,
 		TLS:         tlsCfg,
 		Credentials: auth.StaticTokenProvider(token),
-		TestDialer:  b.dialer(),
 	}
 	for _, o := range opts {
 		o(cfg)
@@ -47,7 +46,7 @@ func newTestClient(t *testing.T, b *bufConnServer, token string, opts ...func(*c
 
 // --- Point 1: the six RPCs succeed. ---
 func TestSixRPCs(t *testing.T) {
-	b := startBufConn(NewMockServer())
+	b := startTestServer(t, NewMockServer())
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -87,7 +86,7 @@ func TestSixRPCs(t *testing.T) {
 func TestJsonResponsePassthrough(t *testing.T) {
 	srv := NewMockServer()
 	srv.OverrideError("GetQrStatus", nil) // ensure success path; set json below
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -101,7 +100,7 @@ func TestJsonResponsePassthrough(t *testing.T) {
 func TestJWTDynamicAndAuth(t *testing.T) {
 	srv := NewMockServer()
 	srv.SetAuthRequired(testToken)
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 
 	// valid token -> success and header captured
@@ -150,7 +149,7 @@ func TestErrorMatrix(t *testing.T) {
 		t.Run(code.String(), func(t *testing.T) {
 			srv := NewMockServer()
 			srv.OverrideError("GetCatalogo", status.Error(code, "boom"))
-			b := startBufConn(srv)
+			b := startTestServer(t, srv)
 			defer b.stop()
 			c := newTestClient(t, b, testToken)
 			defer c.Close()
@@ -166,7 +165,7 @@ func TestErrorMatrix(t *testing.T) {
 func TestReadBackoffBounded(t *testing.T) {
 	srv := NewMockServer()
 	srv.FailTimes("GetCliente", 2, codes.Unavailable) // fail twice then succeed
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -181,7 +180,7 @@ func TestReadBackoffBounded(t *testing.T) {
 func TestReadNonRetryableImmediate(t *testing.T) {
 	srv := NewMockServer()
 	srv.OverrideError("GetCliente", status.Error(codes.NotFound, "nope"))
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -195,7 +194,7 @@ func TestReadNonRetryableImmediate(t *testing.T) {
 func TestCreateQrExactlyOnce(t *testing.T) {
 	srv := NewMockServer()
 	srv.FailTimes("CreateQr", 5, codes.Unavailable) // many transient failures
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -210,7 +209,7 @@ func TestCreateQrExactlyOnce(t *testing.T) {
 func TestCreateTelefonicoExactlyOnce(t *testing.T) {
 	srv := NewMockServer()
 	srv.FailTimes("CreateTelefonico", 5, codes.Unavailable)
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -226,7 +225,7 @@ func TestCreateTelefonicoExactlyOnce(t *testing.T) {
 func TestCreateQrUnavailableIsUnknownOutcome(t *testing.T) {
 	srv := NewMockServer()
 	srv.FailTimes("CreateQr", 1, codes.Unavailable) // request received then dropped
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -244,7 +243,7 @@ func TestCreateQrUnavailableIsUnknownOutcome(t *testing.T) {
 func TestCreateTelefonicoDeadlineExceededIsUnknownOutcome(t *testing.T) {
 	srv := NewMockServer()
 	srv.FailTimes("CreateTelefonico", 1, codes.DeadlineExceeded)
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -261,7 +260,7 @@ func TestCreateTelefonicoDeadlineExceededIsUnknownOutcome(t *testing.T) {
 // --- Point 13: cancellation and disconnect. ---
 func TestCreateCancelledBeforeCallNotSent(t *testing.T) {
 	srv := NewMockServer()
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -276,7 +275,7 @@ func TestCreateCancelledBeforeCallNotSent(t *testing.T) {
 func TestCreateDisconnectAfterConnect(t *testing.T) {
 	srv := NewMockServer()
 	srv.FailTimes("CreateQr", 1, codes.Unavailable)
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	c := newTestClient(t, b, testToken)
 	// stop server to force a disconnect; keep client
 	b.stop()
@@ -292,7 +291,7 @@ func TestPendingReconciliation(t *testing.T) {
 	srv := NewMockServer()
 	srv.OverrideError("CreateQr", status.Error(codes.Aborted,
 		"TUPAGO_PENDING_RECONCILIATION: duplicate idempotency key in flight"))
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -307,7 +306,7 @@ func TestPendingReconciliation(t *testing.T) {
 // --- Point 15: idempotency key preserved verbatim. ---
 func TestIdempotencyKeyIntact(t *testing.T) {
 	srv := NewMockServer()
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -324,7 +323,7 @@ func TestIdempotencyKeyIntact(t *testing.T) {
 
 func TestIdempotencyKeyRejectedWhenEmpty(t *testing.T) {
 	srv := NewMockServer()
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -337,7 +336,7 @@ func TestIdempotencyKeyRejectedWhenEmpty(t *testing.T) {
 // --- Point 16: concurrency and close. ---
 func TestConcurrencyAndClose(t *testing.T) {
 	srv := NewMockServer()
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 
@@ -372,7 +371,7 @@ func TestConcurrencyAndClose(t *testing.T) {
 // --- Point 17: absence of secrets in logs. ---
 func TestNoSecretsInLogs(t *testing.T) {
 	srv := NewMockServer()
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()

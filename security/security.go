@@ -37,8 +37,7 @@ func WithCACertPEM(pem []byte) Option {
 }
 
 // WithServerName sets the TLS server name used for certificate verification
-// when the dial target does not match the certificate SAN (e.g. an in-memory
-// "bufnet" target). It does NOT disable verification.
+// (matched against the certificate SAN). It does NOT disable verification.
 func WithServerName(name string) Option {
 	return func(c *tls.Config) error {
 		if name == "" {
@@ -49,17 +48,8 @@ func WithServerName(name string) Option {
 	}
 }
 
-// WithInsecureSkipVerify must NEVER be used for production. It is provided only
-// for documented, isolated test scenarios and is rejected by the client unless
-// the target is loopback.
-func WithInsecureSkipVerify() Option {
-	return func(c *tls.Config) error {
-		c.InsecureSkipVerify = true
-		return nil
-	}
-}
-
-// NewTLSConfig builds a TLS config with a secure baseline (TLS 1.2+).
+// NewTLSConfig builds a TLS config with a secure baseline (TLS 1.2+). Server
+// certificate verification is ALWAYS enforced; there is no option to disable it.
 func NewTLSConfig(opts ...Option) (*TLSConfig, error) {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	for _, o := range opts {

@@ -17,7 +17,7 @@ import (
 func TestResilienceReadDeadline(t *testing.T) {
 	srv := NewMockServer()
 	srv.SetLatency(200 * time.Millisecond)
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -42,7 +42,7 @@ func TestResilienceReadDeadline(t *testing.T) {
 func TestResilienceCreateAfterSendLossUnknownOutcome(t *testing.T) {
 	srv := NewMockServer()
 	srv.FailTimes("CreateTelefonico", 1, codes.Unavailable) // request received, then dropped
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -59,7 +59,7 @@ func TestResilienceCreateAfterSendLossUnknownOutcome(t *testing.T) {
 // --- Point 10: duplicate/late response must not trigger a second invocation. ---
 func TestResilienceNoDuplicateReinvocation(t *testing.T) {
 	srv := NewMockServer()
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 	c := newTestClient(t, b, testToken)
 	defer c.Close()
@@ -77,7 +77,7 @@ func TestResilienceNoDuplicateReinvocation(t *testing.T) {
 // --- Point 10: concurrent clients do not cross-talk or retry financially. ---
 func TestResilienceConcurrentClients(t *testing.T) {
 	srv := NewMockServer()
-	b := startBufConn(srv)
+	b := startTestServer(t, srv)
 	defer b.stop()
 
 	const n = 8
