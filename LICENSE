@@ -1,0 +1,16 @@
+TUPAGO3 SDK — GO
+PROPRIETARY SOFTWARE — CONFIDENTIAL
+
+Copyright (c) TUPAGO. All rights reserved.
+
+This software is licensed for INTERNAL CONTROLLED DISTRIBUTION only. It is
+provided without warranty of any kind, express or implied. No part of this
+software may be reproduced, distributed, modified, or made available to third
+parties without prior written authorization from TUPAGO.
+
+Redistribution and use in source or binary form, with or without modification,
+outside the authorized internal distribution channel is strictly prohibited.
+
+The SDK implements client-side access to the TUPAGO3 PaymentService gRPC
+contract. It MUST NOT be used to perform real financial operations against
+production Banxico / PSP endpoints unless explicitly authorized.

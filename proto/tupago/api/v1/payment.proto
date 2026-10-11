@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package tupago.api.v1;
+
+option java_multiple_files = true;
+option java_package = "click.tupago.web.grpc.v1";
+option java_outer_classname = "TupagoPaymentProto";
+
+// SDK-local go_package. The authoritative contract lives in
+// backend3/src/main/proto/tupago/api/v1/payment.proto and is byte-identical
+// for every non-option field. This option is added only in the SDK copy so
+// the generated Go bindings carry a stable import path.
+option go_package = "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1;v1";
+
+// F03: gRPC peer adapter to REST/GraphQL. Every RPC delegates to the same F01
+// Application Services, so the ownership boundary, idempotency seam and
+// reference-data cache are enforced exactly once across all transports.
+service PaymentService {
+  rpc GetCliente(GetClienteRequest) returns (ClientePerfil);
+  rpc GetCatalogo(GetCatalogoRequest) returns (CatalogoInstitucion);
+  rpc GetQrStatus(GetStatusRequest) returns (JsonResponse);
+  rpc GetTelefonicoStatus(GetStatusRequest) returns (JsonResponse);
+  rpc CreateQr(CreateQrRequest) returns (JsonResponse);
+  rpc CreateTelefonico(CreateTelefonicoRequest) returns (JsonResponse);
+}
+
+message GetClienteRequest {
+  int64 id = 1;
+}
+
+message GetCatalogoRequest {
+  string clave_institucion = 1;
+}
+
+message GetStatusRequest {
+  string idc = 1;
+  int64 id_cuenta = 2;
+}
+
+message CreateQrRequest {
+  int64 id_cuenta = 1;
+  double monto = 2;
+  string concepto = 3;
+  int32 referencia_numerica = 4;
+  string nombre_cliente = 5;
+  string email = 6;
+  int32 tipo_pago = 7;
+  int32 vigencia = 8;
+  string idempotency_key = 9;
+}
+
+message CreateTelefonicoRequest {
+  string key = 1;
+  double monto = 2;
+  string concepto = 3;
+  int32 referencia_numerica = 4;
+  string numero_celular = 5;
+  int32 vigencia = 6;
+  string idempotency_key = 7;
+}
+
+message ClientePerfil {
+  Cliente cliente = 1;
+  CatalogoInstitucion catalogo_institucion = 2;
+}
+
+message Cliente {
+  int64 id = 1;
+  string nombre = 2;
+  string clave_institucion = 3;
+  string key = 4;
+}
+
+message CatalogoInstitucion {
+  int64 id = 1;
+  string clave_institucion = 2;
+  string nombre_corto = 3;
+}
+
+// Raw Banxico payloads (status + create responses) are returned as JSON strings so the
+// gRPC contract is a structural/transport peer of REST/GraphQL (same bytes).
+message JsonResponse {
+  string json = 1;
+}
