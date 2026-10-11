@@ -2,12 +2,21 @@ package client_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
@@ -215,18 +224,61 @@ func (m *MockServer) CreateTelefonico(ctx context.Context, req *v1.CreateTelefon
 	return &v1.JsonResponse{Json: `{"ref":"TEL-123"}`}, nil
 }
 
-// bufConnServer wires a MockServer over an in-memory bufconn listener.
+// bufConnServer wires a MockServer over an in-memory bufconn listener using a
+// verified TLS transport (self-signed cert + injected CA). Tests exercise the
+// SDK's TLS path over an in-memory channel, so no plaintext is ever opened and
+// the loopback-plaintext exception is never relied upon. The dialer is injected
+// into the SDK via Config.TestDialer (test-only), never via a public option that
+// could downgrade TLS.
 type bufConnServer struct {
-	srv *grpc.Server
-	lis *bufconn.Listener
+	srv     *grpc.Server
+	lis     *bufconn.Listener
+	certPEM []byte
+}
+
+// genTestCert returns a self-signed PEM pair whose SANs include "localhost" and
+// 127.0.0.1/::1, so the SDK's TLS verification (ServerName "localhost") succeeds.
+func genTestCert() (certPEM, keyPEM []byte) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic("genTestCert: " + err.Error())
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "tupago-bufnet-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		panic("genTestCert: " + err.Error())
+	}
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		panic("genTestCert: " + err.Error())
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return
 }
 
 func startBufConn(srv v1.PaymentServiceServer) *bufConnServer {
+	certPEM, keyPEM := genTestCert()
 	lis := bufconn.Listen(4 * 1024 * 1024)
-	s := grpc.NewServer()
+	kp, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		panic("startBufConn: bad key pair: " + err.Error())
+	}
+	s := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{kp}})))
 	v1.RegisterPaymentServiceServer(s, srv)
 	go func() { _ = s.Serve(lis) }()
-	return &bufConnServer{srv: s, lis: lis}
+	return &bufConnServer{srv: s, lis: lis, certPEM: certPEM}
 }
 
 func (b *bufConnServer) dialer() func(context.Context, string) (net.Conn, error) {

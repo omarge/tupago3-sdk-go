@@ -73,9 +73,14 @@ A complete, dependency-free consumer application lives at `../tupago3-sdk-go-con
 
 ## Security model
 
-* **TLS:** required for every non-loopback target. Plaintext is allowed **only**
-  for `127.0.0.1`, `::1` and `localhost`, and only when `Config.Insecure` is set
-  for an in-memory transport (`AllowInsecureNonLoopback`).
+* **TLS:** required for every non-loopback target (fail-closed). Plaintext is
+  allowed **only** for `127.0.0.1`, `::1` and `localhost`, and only when
+  `Config.Insecure` is set (loopback-only; non-loopback plaintext is always
+  rejected). Transport credentials are derived solely from `Config.TLS` /
+  `Config.Insecure` and are appended last and authoritatively — no public option
+  can downgrade TLS to plaintext or override the peer's transport security.
+  Tests inject an in-memory dialer via the test-only `Config.TestDialer`, which
+  carries no transport credentials.
 * **JWT:** injected per RPC via `PerRPCCredentials`. Tokens are never written to
   logs or returned in errors.
 * **Create safety:** no `InsecureSkipVerify` for production; `Create*` RPCs are

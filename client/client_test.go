@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/status"
@@ -20,17 +19,23 @@ import (
 	"github.com/omarge/tupago3-sdk-go/client"
 	"github.com/omarge/tupago3-sdk-go/errors"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
+	"github.com/omarge/tupago3-sdk-go/security"
 )
 
 const testToken = "eyJhbGciOiJIUzI1NiJ9.test-token"
 
 func newTestClient(t *testing.T, b *bufConnServer, token string, opts ...func(*client.Config)) *client.PaymentClient {
 	t.Helper()
+	tlsCfg, err := security.NewTLSConfig(
+		security.WithCACertPEM(b.certPEM),
+		security.WithServerName("localhost"),
+	)
+	require.NoError(t, err)
 	cfg := &client.Config{
-		Target:           "passthrough:///bufnet",
-		Insecure:         true,
-		Credentials:      auth.StaticTokenProvider(token),
-		ExtraDialOptions: []grpc.DialOption{grpc.WithContextDialer(b.dialer())},
+		Target:      "passthrough:///bufnet",
+		TLS:         tlsCfg,
+		Credentials: auth.StaticTokenProvider(token),
+		TestDialer:  b.dialer(),
 	}
 	for _, o := range opts {
 		o(cfg)

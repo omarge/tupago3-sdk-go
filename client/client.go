@@ -2,11 +2,23 @@
 // It exposes PaymentClient with the six PaymentService RPCs, injectable TLS and
 // JWT configuration, bounded read retries, and the strict "Create is
 // exactly-once, never auto-retried" financial invariant.
+//
+// TRANSPORT SECURITY (fail-closed):
+//   - Loopback targets may use plaintext (Insecure) — this is the only sanctioned
+//     plaintext path and is used for the isolated loopback dev/backend lab.
+//   - Any non-loopback target REQUIRES verified TLS. There is NO public option that
+//     can downgrade or bypass this: the SDK derives transport credentials solely
+//     from cfg.TLS / cfg.Insecure (loopback-checked) and appends them LAST, so they
+//     are authoritative and cannot be overridden by caller-supplied dial options.
+//   - TestDialer is a TEST-ONLY escape hatch that injects a connection dialer
+//     (e.g. an in-memory bufconn listener). It carries NO transport credentials and
+//     therefore cannot disable TLS; if TLS is configured the dialer connection is
+//     still TLS-protected, and Insecure (plaintext) remains loopback-only.
 package client
 
 import (
 	"context"
-	"strings"
+	"net"
 	"sync"
 	"time"
 
@@ -55,16 +67,22 @@ type Config struct {
 	// ConnectTimeout bounds the initial connection readiness probe. Zero => default.
 	ConnectTimeout time.Duration
 
-	// Insecure disables TLS and uses plaintext transport credentials. It is only
-	// permitted for loopback targets, or for in-memory test transports that are
-	// not addressable as a network host (e.g. a bufconn "bufnet" target reached
-	// via a grpc.WithContextDialer in ExtraDialOptions). NEVER use Insecure
-	// against a real remote target: plaintext to a non-loopback, non-in-memory
-	// target is rejected at construction time (fail-closed).
+	// Insecure disables TLS and uses plaintext transport credentials. It is ONLY
+	// permitted for LOOPBACK targets (127.0.0.1, ::1, localhost). Any non-loopback
+	// target with Insecure is rejected at construction time (fail-closed); this
+	// holds even when TestDialer is supplied. NEVER use Insecure against a real
+	// remote target.
 	Insecure bool
 
-	// ExtraDialOptions are appended last to the grpc dial options.
-	ExtraDialOptions []grpc.DialOption
+	// TestDialer is a TEST-ONLY escape hatch that injects a custom connection
+	// dialer (e.g. an in-memory bufconn listener) via grpc.WithContextDialer. It
+	// MUST NOT be used in production. Crucially it carries NO transport credentials
+	// and cannot disable TLS: the SDK always sets its own transport credentials
+	// (derived from TLS/Insecure) AFTER the dialer, so they remain authoritative.
+	// Callers must ensure the dialer is in-memory; the SDK cannot verify this and
+	// relies on the documented test contract. Insecure (plaintext) stays
+	// loopback-only regardless of TestDialer.
+	TestDialer func(ctx context.Context, addr string) (net.Conn, error)
 }
 
 // PaymentClient is a reusable, concurrency-safe TUPAGO3 client.
@@ -80,6 +98,9 @@ type PaymentClient struct {
 
 // NewClient builds and connects a PaymentClient. It fails fast on invalid
 // configuration (e.g. non-loopback without TLS, missing target, empty token).
+//
+// Transport credentials are appended LAST and are authoritative: no caller
+// option can override the SDK's chosen transport security.
 func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 	if cfg == nil {
 		return nil, errors.NewConfigError("cfg", "nil config")
@@ -88,16 +109,20 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 		return nil, errors.NewConfigError("Target", "required")
 	}
 	tlsEnabled := cfg.TLS != nil
+
+	// Plaintext is permitted ONLY for loopback targets. This is fail-closed: a
+	// non-loopback target with Insecure is rejected regardless of any dialer.
 	plaintextAllowed := false
 	if cfg.Insecure {
-		if security.IsLoopback(cfg.Target) || isInMemoryTarget(cfg.Target) {
-			plaintextAllowed = true
-		} else {
+		if !security.IsLoopback(cfg.Target) {
 			return nil, errors.NewConfigError("Insecure",
 				"plaintext not permitted for non-loopback target "+cfg.Target)
 		}
+		plaintextAllowed = true
 	}
 	if !plaintextAllowed && !tlsEnabled {
+		// Loopback without TLS is explicitly permitted; non-loopback without TLS
+		// is rejected by RequireTLSForTarget (fail-closed).
 		if err := security.RequireTLSForTarget(cfg.Target, false); err != nil {
 			return nil, err
 		}
@@ -131,13 +156,25 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 			grpc.MaxCallSendMsgSize(maxSend),
 		),
 	}
+
+	// TEST-ONLY dialer injection. It is added BEFORE transport credentials so it
+	// can never override the SDK's chosen security. The dialer only decides HOW to
+	// reach the peer; the SDK still enforces TLS-or-loopback-plaintext on top.
+	if cfg.TestDialer != nil {
+		dialOpts = append(dialOpts, grpc.WithContextDialer(cfg.TestDialer))
+	}
+
+	// Authoritative transport credentials (ALWAYS last). Derived solely from the
+	// SDK's own config; callers cannot supply an alternative transport-credential
+	// option, so there is no way to downgrade TLS to plaintext for a remote target.
 	if tlsEnabled {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(cfg.TLS.Config)))
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
+
+	// Per-RPC Bearer JWT (cannot alter transport security).
 	dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(perRPC))
-	dialOpts = append(dialOpts, cfg.ExtraDialOptions...)
 
 	conn, err := grpc.NewClient(cfg.Target, dialOpts...)
 	if err != nil {
@@ -205,26 +242,3 @@ var (
 	errConnShutdown = errors.NewConfigError("Target", "connection shutdown")
 	errConnNotReady = errors.NewConfigError("Target", "connection not ready within timeout")
 )
-
-// isInMemoryTarget reports whether target addresses an in-memory test transport
-// (e.g. a bufconn "bufnet" listener) rather than a real network host. Such
-// targets are only reachable through a custom dialer supplied via
-// ExtraDialOptions (grpc.WithContextDialer), so plaintext is safe there: it can
-// never reach an off-host peer. This is the only sanctioned exception to the
-// loopback-only plaintext rule and replaces the removed AllowInsecureNonLoopback
-// public flag, which previously let callers disable TLS for arbitrary remote
-// targets.
-func isInMemoryTarget(target string) bool {
-	if target == "" {
-		return false
-	}
-	if target == "bufnet" {
-		return true
-	}
-	// grpc's passthrough resolver passes the target verbatim to the dialer,
-	// which for bufconn is a grpc.WithContextDialer to an in-memory listener.
-	if strings.HasPrefix(target, "passthrough://") {
-		return true
-	}
-	return false
-}
