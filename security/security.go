@@ -36,6 +36,19 @@ func WithCACertPEM(pem []byte) Option {
 	}
 }
 
+// WithServerName sets the TLS server name used for certificate verification
+// when the dial target does not match the certificate SAN (e.g. an in-memory
+// "bufnet" target). It does NOT disable verification.
+func WithServerName(name string) Option {
+	return func(c *tls.Config) error {
+		if name == "" {
+			return errors.New("tupago: empty ServerName")
+		}
+		c.ServerName = name
+		return nil
+	}
+}
+
 // WithInsecureSkipVerify must NEVER be used for production. It is provided only
 // for documented, isolated test scenarios and is rejected by the client unless
 // the target is loopback.

@@ -27,11 +27,10 @@ const testToken = "eyJhbGciOiJIUzI1NiJ9.test-token"
 func newTestClient(t *testing.T, b *bufConnServer, token string, opts ...func(*client.Config)) *client.PaymentClient {
 	t.Helper()
 	cfg := &client.Config{
-		Target:                   "passthrough:///bufnet",
-		Insecure:                 true,
-		AllowInsecureNonLoopback: true,
-		Credentials:              auth.StaticTokenProvider(token),
-		ExtraDialOptions:         []grpc.DialOption{grpc.WithContextDialer(b.dialer())},
+		Target:           "passthrough:///bufnet",
+		Insecure:         true,
+		Credentials:      auth.StaticTokenProvider(token),
+		ExtraDialOptions: []grpc.DialOption{grpc.WithContextDialer(b.dialer())},
 	}
 	for _, o := range opts {
 		o(cfg)

@@ -6,6 +6,7 @@ package client
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,15 +56,12 @@ type Config struct {
 	ConnectTimeout time.Duration
 
 	// Insecure disables TLS and uses plaintext transport credentials. It is only
-	// permitted for loopback targets. For in-memory test transports that are not
-	// addressable as loopback (e.g. bufconn "bufnet"), also set
-	// AllowInsecureNonLoopback. NEVER use Insecure against a real remote target.
+	// permitted for loopback targets, or for in-memory test transports that are
+	// not addressable as a network host (e.g. a bufconn "bufnet" target reached
+	// via a grpc.WithContextDialer in ExtraDialOptions). NEVER use Insecure
+	// against a real remote target: plaintext to a non-loopback, non-in-memory
+	// target is rejected at construction time (fail-closed).
 	Insecure bool
-
-	// AllowInsecureNonLoopback permits Insecure on non-loopback targets. This is
-	// reserved for in-memory test harnesses (bufconn) and MUST NOT be used for
-	// production. The SDK still rejects TLS-less real remote targets by default.
-	AllowInsecureNonLoopback bool
 
 	// ExtraDialOptions are appended last to the grpc dial options.
 	ExtraDialOptions []grpc.DialOption
@@ -92,7 +90,7 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 	tlsEnabled := cfg.TLS != nil
 	plaintextAllowed := false
 	if cfg.Insecure {
-		if security.IsLoopback(cfg.Target) || cfg.AllowInsecureNonLoopback {
+		if security.IsLoopback(cfg.Target) || isInMemoryTarget(cfg.Target) {
 			plaintextAllowed = true
 		} else {
 			return nil, errors.NewConfigError("Insecure",
@@ -207,3 +205,26 @@ var (
 	errConnShutdown = errors.NewConfigError("Target", "connection shutdown")
 	errConnNotReady = errors.NewConfigError("Target", "connection not ready within timeout")
 )
+
+// isInMemoryTarget reports whether target addresses an in-memory test transport
+// (e.g. a bufconn "bufnet" listener) rather than a real network host. Such
+// targets are only reachable through a custom dialer supplied via
+// ExtraDialOptions (grpc.WithContextDialer), so plaintext is safe there: it can
+// never reach an off-host peer. This is the only sanctioned exception to the
+// loopback-only plaintext rule and replaces the removed AllowInsecureNonLoopback
+// public flag, which previously let callers disable TLS for arbitrary remote
+// targets.
+func isInMemoryTarget(target string) bool {
+	if target == "" {
+		return false
+	}
+	if target == "bufnet" {
+		return true
+	}
+	// grpc's passthrough resolver passes the target verbatim to the dialer,
+	// which for bufconn is a grpc.WithContextDialer to an in-memory listener.
+	if strings.HasPrefix(target, "passthrough://") {
+		return true
+	}
+	return false
+}

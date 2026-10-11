@@ -130,13 +130,14 @@ func TestPlaintextAllowedForLoopback(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// --- Point 6: Insecure explicitly forbidden for non-loopback. ---
+// --- Point 6: Insecure is ALWAYS forbidden for non-loopback network targets.
+// The removed AllowInsecureNonLoopback public flag used to let callers disable
+// TLS for arbitrary remote targets; plaintext off-host is now fail-closed.
 func TestInsecureForbiddenForNonLoopback(t *testing.T) {
 	_, err := client.NewClient(context.Background(), &client.Config{
-		Target:                   "192.0.2.1:443",
-		Insecure:                 true,
-		AllowInsecureNonLoopback: false,
-		Credentials:              auth.StaticTokenProvider(testToken),
+		Target:      "192.0.2.1:443", // TEST-NET, non-loopback
+		Insecure:    true,
+		Credentials: auth.StaticTokenProvider(testToken),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "plaintext not permitted")
