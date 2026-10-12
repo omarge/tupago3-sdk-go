@@ -42,3 +42,9 @@ jobs:
 
       - name: Test with race detector
         run: go test -race -timeout 180s ./...
+
+      - name: Verify external consumer module (SEC15)
+        run: |
+          cd examples/consumer
+          go build ./...
+          go test -timeout 120s ./...

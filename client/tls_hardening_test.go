@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"net"
 	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 
@@ -336,13 +338,24 @@ func TestSEC14UnknownOutcomePreserved(t *testing.T) {
 }
 
 // The independent consumer module (public API only) still builds and passes
-// after removing WithInsecureSkipVerify and TestDialer.
+// after removing WithInsecureSkipVerify and TestDialer. The consumer lives in-repo
+// (examples/consumer, its own go.mod with a local replace to the SDK) so it is
+// deterministically available in CI without depending on a sibling VCS repo.
 func TestSEC15ExternalConsumerBuildAndRuntimeGREEN(t *testing.T) {
 	if testing.Short() {
 		t.Skip("external consumer verification skipped in short mode")
 	}
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("unable to resolve test source path")
+	}
+	// This test file lives at <repo>/client/tls_hardening_test.go; resolve the
+	// in-repo consumer module from the repo root rather than the package cwd.
+	repoRoot := filepath.Dir(filepath.Dir(thisFile))
+	consumerDir := filepath.Join(repoRoot, "examples", "consumer")
+
 	cmd := exec.Command("go", "test", "./...")
-	cmd.Dir = "../../tupago3-sdk-go-consumer"
+	cmd.Dir = consumerDir
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "external consumer tests must pass:\n%s", out)
 }
