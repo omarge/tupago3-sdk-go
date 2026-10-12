@@ -238,7 +238,7 @@ func TestSEC09RemotePlaintextRejectedBeforeDial(t *testing.T) {
 		Credentials: auth.StaticTokenProvider(testToken),
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TLS required")
+	assert.Contains(t, err.Error(), "explicit TLS is required")
 }
 
 // SEC-GO-02: loopback plaintext remains permitted (regression of the sanctioned

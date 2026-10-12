@@ -15,11 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/omarge/tupago3-sdk-go/auth"
 	"github.com/omarge/tupago3-sdk-go/client"
 	"github.com/omarge/tupago3-sdk-go/errors"
+	"github.com/omarge/tupago3-sdk-go/security"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
 )
 
@@ -64,12 +66,15 @@ func backendReachable(addr string) bool {
 // are intentionally NOT exercised here (see the in-memory financial simulator).
 //
 // Required (runtime, not committed) env:
-//   - TUPAGO_BACKEND_ADDR        (default 127.0.0.1:9090)
+//   - TUPAGO_BACKEND_ADDR        explicit isolated cert/loopback endpoint (NO default; never 9090)
 //   - TUPAGO_JWT_BASE64_SECRET   dev base64 JWT secret (for the "valid JWT" case)
 func TestBackend3RealReads(t *testing.T) {
 	addr := os.Getenv("TUPAGO_BACKEND_ADDR")
 	if addr == "" {
-		addr = "127.0.0.1:9090"
+		// No explicit target: never default to 127.0.0.1:9090 (which on a production
+		// host collides with the live backend gRPC port). Require an explicit,
+		// isolated cert/loopback endpoint so the suite can never silently probe prod.
+		t.Skipf("BLOCKED: TUPAGO_BACKEND_ADDR not set; skipping real integration (point it at an isolated cert/loopback endpoint).")
 	}
 	if !backendReachable(addr) {
 		t.Skipf("BLOCKED: backend real gRPC endpoint %s not reachable; skipping real integration (safe tests continue).", addr)
@@ -77,8 +82,37 @@ func TestBackend3RealReads(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Honour explicit TLS+CA when the lab CA is provided (loopback cert env serves
+	// TLS). Fall back to explicit Insecure(loopback) only for a plaintext dev backend.
+	// Verification is never disabled; serverName is pinned to "localhost".
+	caPath := os.Getenv("TUPAGO_GRPC_CA_PATH")
+	buildCreds := func(t *testing.T, token string) *client.Config {
+		cfg := &client.Config{Target: addr, ConnectTimeout: 5 * time.Second,
+			Credentials: auth.StaticTokenProvider(token)}
+		if caPath != "" {
+			pem, rerr := os.ReadFile(caPath)
+			require.NoError(t, rerr)
+			tlsCfg, cerr := security.NewTLSConfig(security.WithCACertPEM(pem), security.WithServerName("localhost"))
+			require.NoError(t, cerr)
+			cfg.TLS = tlsCfg
+		} else {
+			cfg.Insecure = true
+		}
+		return cfg
+	}
+
 	// Absent token: raw connection without per-RPC credentials -> UNAUTHENTICATED.
-	rawConn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var absentRawCreds credentials.TransportCredentials
+	if caPath != "" {
+		pem, rerr := os.ReadFile(caPath)
+		require.NoError(t, rerr)
+		tlsCfg, cerr := security.NewTLSConfig(security.WithCACertPEM(pem), security.WithServerName("localhost"))
+		require.NoError(t, cerr)
+		absentRawCreds = credentials.NewTLS(tlsCfg.Config)
+	} else {
+		absentRawCreds = insecure.NewCredentials()
+	}
+	rawConn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(absentRawCreds))
 	require.NoError(t, err)
 	defer rawConn.Close()
 	absent := v1.NewPaymentServiceClient(rawConn)
@@ -88,10 +122,7 @@ func TestBackend3RealReads(t *testing.T) {
 		"absent JWT must be rejected with UNAUTHENTICATED, got: %v", err)
 
 	// Invalid token -> UNAUTHENTICATED.
-	badC, err := client.NewClient(ctx, &client.Config{
-		Target: addr, Insecure: false, ConnectTimeout: 5 * time.Second,
-		Credentials: auth.StaticTokenProvider("not-a-valid-token"),
-	})
+	badC, err := client.NewClient(ctx, buildCreds(t, "not-a-valid-token"))
 	require.NoError(t, err)
 	defer badC.Close()
 	_, err = badC.GetCatalogo(ctx, &v1.GetCatalogoRequest{ClaveInstitucion: "BCM"})
@@ -105,6 +136,16 @@ func TestBackend3RealReads(t *testing.T) {
 	// assert that the request is authenticated (NOT UNAUTHENTICATED) and, for
 	// GetCliente(id=1), that ownership resolution returns the entity owned by
 	// the JWT principal (prodgcp / userId=2000).
+	// Operator-supplied scoped token (F03 A/B matrix): if TUPAGO_JWT is set, use it
+	// directly instead of forging. Never printed, logged, or written to disk.
+	if operatorTok := os.Getenv("TUPAGO_JWT"); operatorTok != "" {
+		validC, err := client.NewClient(ctx, buildCreds(t, operatorTok))
+		require.NoError(t, err)
+		defer validC.Close()
+		_, cerr := validC.GetCliente(ctx, &v1.GetClienteRequest{Id: 1})
+		require.NoError(t, cerr, "valid operator JWT must be authenticated (NOT UNAUTHENTICATED)")
+		return
+	}
 	secret := os.Getenv("TUPAGO_JWT_BASE64_SECRET")
 	if secret == "" {
 		t.Logf("TUPAGO_JWT_BASE64_SECRET not set; skipping valid-JWT read assertions (auth-required cases still verified).")
@@ -112,10 +153,7 @@ func TestBackend3RealReads(t *testing.T) {
 	}
 	// prodgcp (user id 2000) owns cliente id=1 in the dev/local dataset.
 	tok := forgeHS512JWT(t, secret, "prodgcp", 2000, []string{"ROLE_USER"})
-	validC, err := client.NewClient(ctx, &client.Config{
-		Target: addr, Insecure: true, ConnectTimeout: 5 * time.Second,
-		Credentials: auth.StaticTokenProvider(tok),
-	})
+	validC, err := client.NewClient(ctx, buildCreds(t, tok))
 	require.NoError(t, err)
 	defer validC.Close()
 

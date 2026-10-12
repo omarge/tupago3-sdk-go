@@ -108,8 +108,11 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 			"InsecureSkipVerify is not permitted: server certificate verification cannot be disabled")
 	}
 
-	// Plaintext is permitted ONLY for loopback targets. This is fail-closed: a
-	// non-loopback target with Insecure is rejected regardless of any dialer.
+	// Plaintext is permitted ONLY when Insecure is explicitly set AND the target is
+	// loopback. There is no implicit loopback exception: a target with neither an
+	// explicit TLS config nor an explicit Insecure opt-in never silently falls back
+	// to plaintext (fail-closed). This removes the previous loopback downgrade so
+	// that transport security is always explicit and verifiable.
 	plaintextAllowed := false
 	if cfg.Insecure {
 		if !security.IsLoopback(cfg.Target) {
@@ -119,12 +122,8 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 		plaintextAllowed = true
 	}
 	if !plaintextAllowed && !tlsEnabled {
-		// Loopback without TLS is explicitly permitted; non-loopback without TLS
-		// is rejected by RequireTLSForTarget (fail-closed).
-		if err := security.RequireTLSForTarget(cfg.Target, false); err != nil {
-			return nil, err
-		}
-		plaintextAllowed = true
+		return nil, errors.NewConfigError("TLS",
+			"explicit TLS is required: provide cfg.TLS (loopback plaintext is only permitted when Insecure:true is set explicitly)")
 	}
 
 	var perRPC credentials.PerRPCCredentials

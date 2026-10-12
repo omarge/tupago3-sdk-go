@@ -111,17 +111,28 @@ func TestPlaintextRejectedForNonLoopback(t *testing.T) {
 		Credentials: auth.StaticTokenProvider(testToken),
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "TLS required")
+	assert.Contains(t, err.Error(), "explicit TLS is required")
 }
 
-// --- Point 6: plaintext permitted for loopback. ---
-func TestPlaintextAllowedForLoopback(t *testing.T) {
+// --- Point 6: plaintext rejected on loopback unless Insecure is explicitly set.
+// A loopback target with NEITHER explicit TLS NOR explicit Insecure must NOT
+// silently fall back to plaintext (fail-closed). Explicit Insecure remains the
+// only sanctioned plaintext path. ---
+func TestPlaintextRequiresExplicitInsecureOnLoopback(t *testing.T) {
+	// Loopback without explicit TLS and without explicit Insecure is rejected.
+	_, err := client.NewClient(context.Background(), &client.Config{
+		Target:      "127.0.0.1:29091",
+		Credentials: auth.StaticTokenProvider(testToken),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "explicit TLS is required")
+
+	// Explicit Insecure+loopback stays the sanctioned plaintext dev path.
 	addr, stop := startTLSServer(t, nil, nil, true) // insecure server
 	defer stop()
-
 	c, err := client.NewClient(context.Background(), &client.Config{
 		Target:      addr, // 127.0.0.1 -> loopback
-		Insecure:    false,
+		Insecure:    true,
 		Credentials: auth.StaticTokenProvider(testToken),
 	})
 	require.NoError(t, err)
