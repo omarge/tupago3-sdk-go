@@ -66,6 +66,36 @@ func (r *recordRTGQL) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+// P0-HTTP-07 (structural, C2): CreateTelefonico must also be non-replayable.
+func TestGraphQL_CreateTelefonico_RequestGetBodyNil_Structural(t *testing.T) {
+	tr, err := NewTransport(&Options{
+		BaseURL:     "http://127.0.0.1:8080",
+		Insecure:    true,
+		Credentials: auth.StaticTokenProvider("tok"),
+	})
+	require.NoError(t, err)
+	rt := &recordRTGQL{respBody: `{"data":{"createPagoTelefonico":"x"}}`}
+	tr.hc.Transport = rt
+
+	_, cerr := tr.CreateTelefonico(context.Background(), &v1.CreateTelefonicoRequest{
+		Key: "k", Monto: 5, NumeroCelular: "5512345678", IdempotencyKey: "idem-tel-structural",
+	})
+	require.NoError(t, cerr)
+
+	rt.mu.Lock()
+	req := rt.lastReq
+	body := rt.lastBody
+	rt.mu.Unlock()
+	require.NotNil(t, req)
+	require.Equal(t, http.MethodPost, req.Method)
+	require.NotNil(t, req.Body)
+	require.Greater(t, req.ContentLength, int64(0))
+	require.Empty(t, req.Header.Get("Idempotency-Key"),
+		"GraphQL carries idempotency in variables, never the HTTP Idempotency-Key header")
+	require.Nil(t, req.GetBody, "financial create must not be replayable: req.GetBody must be nil")
+	require.Contains(t, string(body), "idem-tel-structural", "GraphQL idempotency variable must remain present in payload")
+}
+
 // P0-HTTP-07 (structural): a GraphQL financial CREATE must not be replayable by net/http.
 // The idempotency travels in the GraphQL variables (not the HTTP Idempotency-Key header),
 // so it was not replayable by default; we additionally null GetBody for defense in depth.

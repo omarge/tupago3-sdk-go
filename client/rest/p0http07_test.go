@@ -76,6 +76,33 @@ func (r *recordRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+// P0-HTTP-07 (structural, C2): CreateTelefonico must also be non-replayable.
+func TestREST_CreateTelefonico_RequestGetBodyNil_Structural(t *testing.T) {
+	tr, err := NewTransport(&Options{
+		BaseURL:     "http://127.0.0.1:8080",
+		Insecure:    true,
+		Credentials: auth.StaticTokenProvider("tok"),
+	})
+	require.NoError(t, err)
+	rt := &recordRT{respBody: `{"mensaje":"x"}`}
+	tr.hc.Transport = rt
+
+	_, cerr := tr.CreateTelefonico(context.Background(), &v1.CreateTelefonicoRequest{
+		Key: "k", Monto: 5, NumeroCelular: "5512345678", IdempotencyKey: "idem-tel-structural",
+	})
+	require.NoError(t, cerr)
+
+	rt.mu.Lock()
+	req := rt.lastReq
+	rt.mu.Unlock()
+	require.NotNil(t, req)
+	require.Equal(t, http.MethodPost, req.Method)
+	require.NotNil(t, req.Body)
+	require.Greater(t, req.ContentLength, int64(0))
+	require.Equal(t, "idem-tel-structural", req.Header.Get("Idempotency-Key"), "Idempotency-Key must remain present and verbatim")
+	require.Nil(t, req.GetBody, "financial create must not be replayable: req.GetBody must be nil")
+}
+
 // P0-HTTP-07 (structural): a financial CREATE request must NOT be replayable by net/http.
 // bytes.NewReader + http.NewRequestWithContext auto-populates req.GetBody; we must null it.
 func TestREST_CreateQr_RequestGetBodyNil_Structural(t *testing.T) {
