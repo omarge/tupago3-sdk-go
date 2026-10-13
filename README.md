@@ -13,6 +13,17 @@ Cliente Go idiomático y thread-safe para el contrato `tupago.api.v1.PaymentServ
 
 > **Invariante financiera:** un `Create` se intenta como máximo una vez. Un error transitorio detectado *después* de que la request pudo haber salido se reporta como `UnknownOutcomeError` (reconciliar, **no** reintentar a ciegas).
 
+## ByCuenta en consultas de estatus
+
+Cuando el caller proporciona `idCuenta`, el SDK usa las rutas **ByCuenta** del backend:
+
+| Operación | Ruta REST (ByCuenta) | GraphQL |
+|------------|----------------------|---------|
+| GetQrStatus | `POST /api/payments/estatusmsjqr` | `pagoQrEstatusByCuenta` |
+| GetTelefonicoStatus | `POST /api/payments/estatusmsjcobrotelefonico` | `pagoTelefonicoEstatusByCuenta` |
+
+Esto permite que el cliente indique explícitamente la cuenta.
+
 ## Instalación
 
 ```bash
