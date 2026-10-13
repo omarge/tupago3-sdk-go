@@ -12,11 +12,11 @@ func (c *PaymentClient) GetCliente(ctx context.Context, req *v1.GetClienteReques
 	var out *v1.ClientePerfil
 	err := c.readPolicy().Do(ctx, func(ctx context.Context) error {
 		var e error
-		out, e = c.raw.GetCliente(ctx, req)
+		out, e = c.transport.GetCliente(ctx, req)
 		return e
 	})
 	if err != nil {
-		return nil, errors.MapRPCError(err, "GetCliente")
+		return nil, err
 	}
 	return out, nil
 }
@@ -26,11 +26,11 @@ func (c *PaymentClient) GetCatalogo(ctx context.Context, req *v1.GetCatalogoRequ
 	var out *v1.CatalogoInstitucion
 	err := c.readPolicy().Do(ctx, func(ctx context.Context) error {
 		var e error
-		out, e = c.raw.GetCatalogo(ctx, req)
+		out, e = c.transport.GetCatalogo(ctx, req)
 		return e
 	})
 	if err != nil {
-		return nil, errors.MapRPCError(err, "GetCatalogo")
+		return nil, err
 	}
 	return out, nil
 }
@@ -40,11 +40,11 @@ func (c *PaymentClient) GetQrStatus(ctx context.Context, req *v1.GetStatusReques
 	var out *v1.JsonResponse
 	err := c.readPolicy().Do(ctx, func(ctx context.Context) error {
 		var e error
-		out, e = c.raw.GetQrStatus(ctx, req)
+		out, e = c.transport.GetQrStatus(ctx, req)
 		return e
 	})
 	if err != nil {
-		return nil, errors.MapRPCError(err, "GetQrStatus")
+		return nil, err
 	}
 	return out, nil
 }
@@ -55,11 +55,11 @@ func (c *PaymentClient) GetTelefonicoStatus(ctx context.Context, req *v1.GetStat
 	var out *v1.JsonResponse
 	err := c.readPolicy().Do(ctx, func(ctx context.Context) error {
 		var e error
-		out, e = c.raw.GetTelefonicoStatus(ctx, req)
+		out, e = c.transport.GetTelefonicoStatus(ctx, req)
 		return e
 	})
 	if err != nil {
-		return nil, errors.MapRPCError(err, "GetTelefonicoStatus")
+		return nil, err
 	}
 	return out, nil
 }
@@ -71,12 +71,7 @@ func (c *PaymentClient) CreateQr(ctx context.Context, req *v1.CreateQrRequest) (
 	if err := validateCreateQr(req); err != nil {
 		return nil, err
 	}
-	ctx, sentFn := withSendTracking(ctx)
-	out, err := c.raw.CreateQr(ctx, req)
-	if err != nil {
-		return nil, errors.MapCreateError(err, "CreateQr", sentFn())
-	}
-	return out, nil
+	return c.transport.CreateQr(ctx, req)
 }
 
 // CreateTelefonico creates a telefonico payment. EXACTLY ONE attempt, never
@@ -85,12 +80,7 @@ func (c *PaymentClient) CreateTelefonico(ctx context.Context, req *v1.CreateTele
 	if err := validateCreateTelefonico(req); err != nil {
 		return nil, err
 	}
-	ctx, sentFn := withSendTracking(ctx)
-	out, err := c.raw.CreateTelefonico(ctx, req)
-	if err != nil {
-		return nil, errors.MapCreateError(err, "CreateTelefonico", sentFn())
-	}
-	return out, nil
+	return c.transport.CreateTelefonico(ctx, req)
 }
 
 func validateCreateQr(req *v1.CreateQrRequest) error {

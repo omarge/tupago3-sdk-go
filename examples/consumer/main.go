@@ -51,12 +51,28 @@ func main() {
 		log.Fatalf("tls config: %v", err)
 	}
 
-	c, err := client.NewClient(context.Background(), &client.Config{
+	provider := auth.NewJWTTokenProvider(dynamicTokenProvider)
+	cfg := &client.Config{
 		Target:         target,
 		TLS:            tlsCfg,
-		Credentials:    auth.NewJWTTokenProvider(dynamicTokenProvider),
+		Credentials:    provider,
 		ConnectTimeout: 10 * time.Second,
-	})
+	}
+
+	// TUPAGO_TRANSPORT selects the wire protocol: "grpc" (default) or "rest".
+	// For "rest" the SDK talks to the REST/JSON backend at TUPAGO_REST_URL
+	// (default https://pay.tupago.mx), reusing the same TLS + Bearer identity.
+	if transport := os.Getenv("TUPAGO_TRANSPORT"); transport == "rest" {
+		restURL := os.Getenv("TUPAGO_REST_URL")
+		if restURL == "" {
+			restURL = "https://pay.tupago.mx"
+		}
+		cfg.Transport = "rest"
+		cfg.REST = &client.RESTOptions{BaseURL: restURL}
+		log.Printf("using REST/JSON transport at %s", restURL)
+	}
+
+	c, err := client.NewClient(context.Background(), cfg)
 	if err != nil {
 		log.Fatalf("client: %v", err)
 	}

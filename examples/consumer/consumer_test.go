@@ -11,6 +11,10 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,4 +181,55 @@ func startTLSBenchNoAuth(t *testing.T) (*client.PaymentClient, error) {
 		TLS:         tlsCfg,
 		Credentials: auth.StaticTokenProvider(""),
 	})
+}
+
+// TestConsumerVerifiesSDK_REST is the REST/JSON transport consumer certification.
+// It builds the client from the public API only (Transport="rest") against an
+// in-process fake backend3 and asserts the same contract: NOT_FOUND on a read,
+// exactly-once CreateQr with the idempotency key preserved verbatim, and Bearer
+// propagation. This proves the independent consumer consumes the REST transport.
+func TestConsumerVerifiesSDK_REST(t *testing.T) {
+	var calls int32
+	var lastIdem, lastAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		lastIdem = r.Header.Get("Idempotency-Key")
+		lastAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/catalogo-institucions/clave/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/msjpagoqrusuario"):
+			_, _ = w.Write([]byte(`{"mensaje":{"qr":"https://pay.tupago/qr/x"}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/clientes/"):
+			_, _ = w.Write([]byte(`{"id":1,"nombre":"n","claveInstitucion":"BCM","key":"k"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.NewClient(context.Background(), &client.Config{
+		Target:      srv.URL,
+		Insecure:    true, // loopback plaintext permitted
+		Transport:   "rest",
+		Credentials: auth.StaticTokenProvider("tok"),
+		REST:        &client.RESTOptions{BaseURL: srv.URL},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+
+	// NOT_FOUND on a read.
+	_, err = c.GetCatalogo(context.Background(), &v1.GetCatalogoRequest{ClaveInstitucion: "X"})
+	require.Error(t, err)
+	assert.True(t, errors.HasGRPCCode(err, codes.NotFound), "REST consumer must see NOT_FOUND")
+
+	// CreateQr success: exactly one attempt, idempotency + bearer preserved.
+	before := atomic.LoadInt32(&calls)
+	qr, err := c.CreateQr(context.Background(), &v1.CreateQrRequest{IdCuenta: 1, Monto: 10, IdempotencyKey: "idem-1"})
+	require.NoError(t, err)
+	assert.Equal(t, `{"qr":"https://pay.tupago/qr/x"}`, qr.Json)
+	assert.Equal(t, int32(before+1), atomic.LoadInt32(&calls), "REST CreateQr must be attempted exactly once")
+	assert.Equal(t, "idem-1", lastIdem, "REST idempotency key preserved verbatim")
+	assert.Equal(t, "Bearer tok", lastAuth, "REST bearer token propagated")
 }

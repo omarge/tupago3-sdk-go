@@ -19,6 +19,8 @@ package client
 
 import (
 	"context"
+	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/omarge/tupago3-sdk-go/auth"
+	"github.com/omarge/tupago3-sdk-go/client/rest"
 	"github.com/omarge/tupago3-sdk-go/errors"
 	"github.com/omarge/tupago3-sdk-go/internal/rpcstats"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
@@ -72,14 +75,37 @@ type Config struct {
 	// target with Insecure is rejected at construction time (fail-closed). NEVER
 	// use Insecure against a real remote target.
 	Insecure bool
+
+	// Transport selects the wire protocol. "" or "grpc" use the gRPC peer adapter
+	// (default). "rest" uses the REST/JSON peer adapter and requires REST to be set.
+	// Both adapters implement the same six capabilities and return the identical
+	// typed results and error model.
+	Transport string
+
+	// REST configures the REST/JSON transport. Required when Transport == "rest".
+	REST *RESTOptions
+}
+
+// RESTOptions configures the REST/JSON peer adapter (see client/rest).
+type RESTOptions struct {
+	// BaseURL is the backend origin, e.g. "https://pay.tupago.mx" or
+	// "http://127.0.0.1:8080" for an isolated loopback lab.
+	BaseURL string
+
+	// Routes overrides individual capability paths. Nil uses backend3 defaults.
+	Routes *rest.Routes
+
+	// HTTPClient overrides the default *http.Client (e.g. for proxying/testing).
+	// When nil, one is built from the client TLS/Insecure configuration.
+	HTTPClient *http.Client
 }
 
 // PaymentClient is a reusable, concurrency-safe TUPAGO3 client.
 type PaymentClient struct {
-	conn    *grpc.ClientConn
-	raw     v1.PaymentServiceClient
-	cfg     *Config
-	tracker *rpcstats.Tracker
+	conn      *grpc.ClientConn
+	transport Transport
+	cfg       *Config
+	tracker   *rpcstats.Tracker
 
 	closeOnce sync.Once
 	closeErr  error
@@ -99,6 +125,17 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 	}
 	tlsEnabled := cfg.TLS != nil
 
+	// For the REST transport the actual wire endpoint is REST.BaseURL; resolve the
+	// security/loopback target from it so plaintext-only-on-loopback is enforced
+	// against the real destination, not the (unused) gRPC Target.
+	useREST := cfg.Transport == "rest" || (cfg.Transport == "" && cfg.REST != nil)
+	secTarget := cfg.Target
+	if useREST && cfg.REST != nil && cfg.REST.BaseURL != "" {
+		if u, perr := url.Parse(cfg.REST.BaseURL); perr == nil && u.Host != "" {
+			secTarget = u.Host
+		}
+	}
+
 	// Server identity verification is ALWAYS required for TLS. Reject any config
 	// that tries to disable it (fail-closed), including a consumer-supplied
 	// *tls.Config mutated directly. Encryption without authentication is not
@@ -115,7 +152,7 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 	// that transport security is always explicit and verifiable.
 	plaintextAllowed := false
 	if cfg.Insecure {
-		if !security.IsLoopback(cfg.Target) {
+		if !security.IsLoopback(secTarget) {
 			return nil, errors.NewConfigError("Insecure",
 				"plaintext not permitted for non-loopback target "+cfg.Target)
 		}
@@ -126,6 +163,33 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 			"explicit TLS is required: provide cfg.TLS (loopback plaintext is only permitted when Insecure:true is set explicitly)")
 	}
 
+	// REST/JSON transport branch.
+	if cfg.Transport == "rest" || (cfg.Transport == "" && cfg.REST != nil) {
+		if cfg.Credentials == nil {
+			return nil, errors.NewConfigError("Credentials", "a TokenProvider is required for the REST transport (fail-closed)")
+		}
+		if cfg.REST == nil || cfg.REST.BaseURL == "" {
+			return nil, errors.NewConfigError("REST", "REST.BaseURL is required when Transport=rest")
+		}
+		tr, err := rest.NewTransport(&rest.Options{
+			BaseURL:     cfg.REST.BaseURL,
+			Routes:      cfg.REST.Routes,
+			HTTPClient:  cfg.REST.HTTPClient,
+			TLS:         cfg.TLS,
+			Insecure:    cfg.Insecure,
+			Credentials: cfg.Credentials,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &PaymentClient{
+			transport: tr,
+			cfg:       cfg,
+			tracker:   rpcstats.NewTracker(),
+		}, nil
+	}
+
+	// gRPC transport branch (default).
 	var perRPC credentials.PerRPCCredentials
 	requireTLS := tlsEnabled
 	if cfg.PerRPCCredentials != nil {
@@ -181,10 +245,10 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 	}
 
 	return &PaymentClient{
-		conn:    conn,
-		raw:     v1.NewPaymentServiceClient(conn),
-		cfg:     cfg,
-		tracker: tracker,
+		conn:      conn,
+		transport: &grpcTransport{raw: v1.NewPaymentServiceClient(conn)},
+		cfg:       cfg,
+		tracker:   tracker,
 	}, nil
 }
 
