@@ -15,14 +15,26 @@ Cliente Go idiomático y thread-safe para el contrato `tupago.api.v1.PaymentServ
 
 ## ByCuenta en consultas de estatus
 
-Cuando el caller proporciona `idCuenta`, el SDK usa las rutas **ByCuenta** del backend:
+El backend3 ofrece dos formas de consultar el estatus de un pago:
 
-| Operación | Ruta REST (ByCuenta) | GraphQL |
-|------------|----------------------|---------|
-| GetQrStatus | `POST /api/payments/estatusmsjqr` | `pagoQrEstatusByCuenta` |
-| GetTelefonicoStatus | `POST /api/payments/estatusmsjcobrotelefonico` | `pagoTelefonicoEstatusByCuenta` |
+| Variante | Cuándo usarla | Qué envía el SDK |
+|----------|-----------------|-------------------|
+| **ByCuenta** | El caller conoce la cuenta | `idCuenta` explícito en el body |
+| **Usuario** | El backend resuelve la cuenta del JWT | Solo `idc` |
 
-Esto permite que el cliente indique explícitamente la cuenta.
+**Política del SDK:** si el request incluye `idCuenta` > 0, se usa **ByCuenta** automáticamente.
+
+```go
+// ByCuenta (recomendado)
+status, err := c.GetQrStatus(ctx, &v1.GetStatusRequest{
+    Idc:      "abc123",
+    IdCuenta: 42,   // activa ByCuenta
+})
+
+// Rutas usadas:
+// REST:  POST /api/payments/estatusmsjqr
+// GraphQL: pagoQrEstatusByCuenta(idc, idCuenta)
+```
 
 ## Instalación
 
