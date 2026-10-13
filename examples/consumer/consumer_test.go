@@ -259,17 +259,17 @@ func TestConsumerVerifiesSDK_GraphQL(t *testing.T) {
 			switch q.OperationName {
 			case "createPagoQr":
 				_, _ = w.Write([]byte(`{"data":{"createPagoQr":{"qr":"https://pay.tupago/qr/g"}}}`))
-		case "catalogoInstitucion":
-			var vars struct {
-				ClaveInstitucion string `json:"claveInstitucion"`
-			}
-			_ = json.Unmarshal(body, &vars)
-			if vars.ClaveInstitucion == "BCM" {
-				_, _ = w.Write([]byte(`{"data":{"catalogoInstitucion":{"id":"7","claveInstitucion":"BCM","nombreCorto":"Banco"}}}`))
-			} else {
-				// backend3 returns null data for an unknown clave (NOT_FOUND)
-				_, _ = w.Write([]byte(`{"data":{"catalogoInstitucion":null}}`))
-			}
+			case "catalogoInstitucion":
+				var vars struct {
+					ClaveInstitucion string `json:"claveInstitucion"`
+				}
+				_ = json.Unmarshal(body, &vars)
+				if vars.ClaveInstitucion == "BCM" {
+					_, _ = w.Write([]byte(`{"data":{"catalogoInstitucion":{"id":"7","claveInstitucion":"BCM","nombreCorto":"Banco"}}}`))
+				} else {
+					// backend3 returns null data for an unknown clave (NOT_FOUND)
+					_, _ = w.Write([]byte(`{"data":{"catalogoInstitucion":null}}`))
+				}
 			default:
 				_, _ = w.Write([]byte(`{"data":null,"errors":[{"message":"NOT_FOUND","extensions":{"code":"NOT_FOUND","classification":"not_found"}}]}`))
 			}
