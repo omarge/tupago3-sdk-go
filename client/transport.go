@@ -2,10 +2,25 @@ package client
 
 import (
 	"context"
+	"time"
 
 	"github.com/omarge/tupago3-sdk-go/errors"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
 )
+
+// defaultCallTimeout bounds any RPC whose caller context has no deadline, so a
+// create/read against an unreachable server fails fast (mapping to a typed error)
+// instead of blocking on indefinite transport reconnect.
+const defaultCallTimeout = 30 * time.Second
+
+// withDefaultDeadline returns a context that carries a deadline if the caller's
+// context does not already have one. The returned CancelFunc must be deferred.
+func withDefaultDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, defaultCallTimeout)
+}
 
 // Transport is the protocol-agnostic backend for the six PaymentService
 // capabilities. Both the gRPC and REST adapters implement it, returning the same
@@ -30,6 +45,8 @@ type grpcTransport struct {
 }
 
 func (g *grpcTransport) GetCliente(ctx context.Context, req *v1.GetClienteRequest) (*v1.ClientePerfil, error) {
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
 	out, err := g.raw.GetCliente(ctx, req)
 	if err != nil {
 		return nil, errors.MapRPCError(err, "GetCliente")
@@ -38,6 +55,8 @@ func (g *grpcTransport) GetCliente(ctx context.Context, req *v1.GetClienteReques
 }
 
 func (g *grpcTransport) GetCatalogo(ctx context.Context, req *v1.GetCatalogoRequest) (*v1.CatalogoInstitucion, error) {
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
 	out, err := g.raw.GetCatalogo(ctx, req)
 	if err != nil {
 		return nil, errors.MapRPCError(err, "GetCatalogo")
@@ -46,6 +65,8 @@ func (g *grpcTransport) GetCatalogo(ctx context.Context, req *v1.GetCatalogoRequ
 }
 
 func (g *grpcTransport) GetQrStatus(ctx context.Context, req *v1.GetStatusRequest) (*v1.JsonResponse, error) {
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
 	out, err := g.raw.GetQrStatus(ctx, req)
 	if err != nil {
 		return nil, errors.MapRPCError(err, "GetQrStatus")
@@ -54,6 +75,8 @@ func (g *grpcTransport) GetQrStatus(ctx context.Context, req *v1.GetStatusReques
 }
 
 func (g *grpcTransport) GetTelefonicoStatus(ctx context.Context, req *v1.GetStatusRequest) (*v1.JsonResponse, error) {
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
 	out, err := g.raw.GetTelefonicoStatus(ctx, req)
 	if err != nil {
 		return nil, errors.MapRPCError(err, "GetTelefonicoStatus")
@@ -62,6 +85,8 @@ func (g *grpcTransport) GetTelefonicoStatus(ctx context.Context, req *v1.GetStat
 }
 
 func (g *grpcTransport) CreateQr(ctx context.Context, req *v1.CreateQrRequest) (*v1.JsonResponse, error) {
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
 	ctx, sentFn := withSendTracking(ctx)
 	out, err := g.raw.CreateQr(ctx, req)
 	if err != nil {
@@ -71,6 +96,8 @@ func (g *grpcTransport) CreateQr(ctx context.Context, req *v1.CreateQrRequest) (
 }
 
 func (g *grpcTransport) CreateTelefonico(ctx context.Context, req *v1.CreateTelefonicoRequest) (*v1.JsonResponse, error) {
+	ctx, cancel := withDefaultDeadline(ctx)
+	defer cancel()
 	ctx, sentFn := withSendTracking(ctx)
 	out, err := g.raw.CreateTelefonico(ctx, req)
 	if err != nil {
