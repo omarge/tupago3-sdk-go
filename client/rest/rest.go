@@ -165,6 +165,16 @@ func (t *Transport) newReq(ctx context.Context, method, path, idempotencyKey str
 	}
 	if idempotencyKey != "" {
 		req.Header.Set("Idempotency-Key", idempotencyKey)
+		// P0-HTTP-07: a financial CREATE must not be transparently replayed by the
+		// standard net/http Transport. Because the body is built from a *bytes.Reader,
+		// http.NewRequestWithContext auto-populates req.GetBody; combined with the
+		// Idempotency-Key header, net/http classifies the POST as replayable and may
+		// silently resend it on a reused connection that fails after the first write
+		// (a transparent retry beneath our no-retry policy). Nulling GetBody makes the
+		// request non-replayable while preserving the body, Content-Length, the
+		// Idempotency-Key header and the Authorization header. Reads (idempotencyKey=="")
+		// are intentionally left replayable so SDK-level read retries keep working.
+		req.GetBody = nil
 	}
 	if t.creds == nil {
 		return nil, sdkerrors.NewConfigError("Credentials", "a TokenProvider is required (fail-closed)")

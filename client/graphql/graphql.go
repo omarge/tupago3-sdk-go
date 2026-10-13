@@ -192,6 +192,19 @@ func (t *Transport) call(ctx context.Context, opName, query string, vars map[str
 	// Token is never written to any log.
 	req.Header.Set("Authorization", "Bearer "+tok)
 
+	// P0-HTTP-07: a financial CREATE must not be transparently replayed by the
+	// standard net/http Transport. The body is built from a *bytes.Reader, so
+	// http.NewRequest auto-populates req.GetBody, which would otherwise make the POST
+	// replayable and could be silently resent by net/http on a reused connection that
+	// fails after the first write (a transparent retry beneath our no-retry policy).
+	// Nulling GetBody makes the request non-replayable while preserving the body,
+	// Content-Length and the GraphQL idempotencyKey variable inside the payload.
+	// (GraphQL carries idempotency in the variables, not the HTTP Idempotency-Key
+	// header, so it is not replayable by default; this is defense in depth.)
+	if opName == opCreateQr || opName == opCreateTel {
+		req.GetBody = nil
+	}
+
 	var sent sentTracker
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), sent.trace()))
 	resp, netErr := t.hc.Do(req)
