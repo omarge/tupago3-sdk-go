@@ -62,6 +62,7 @@ func (b *testBackend) expect(t *testing.T, method, path string) {
 func newTransport(t *testing.T, srv *httptest.Server, token string) *rest.Transport {
 	tr, err := rest.NewTransport(&rest.Options{
 		BaseURL:     srv.URL,
+		Insecure:    true, // loopback plaintext permitted
 		Credentials: auth.StaticTokenProvider(token),
 	})
 	require.NoError(t, err)
@@ -109,7 +110,7 @@ func TestREST_CreateQr_NoToken_FailClosed(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	tr, err := rest.NewTransport(&rest.Options{BaseURL: srv.URL}) // no credentials
+	tr, err := rest.NewTransport(&rest.Options{BaseURL: srv.URL, Insecure: true}) // no credentials
 	require.NoError(t, err)
 	_, err = tr.CreateQr(context.Background(), &v1.CreateQrRequest{IdempotencyKey: "k"})
 	require.Error(t, err)

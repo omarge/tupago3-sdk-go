@@ -30,6 +30,7 @@ import (
 
 	"github.com/omarge/tupago3-sdk-go/auth"
 	"github.com/omarge/tupago3-sdk-go/client/graphql"
+	"github.com/omarge/tupago3-sdk-go/client/internal/transportutil"
 	"github.com/omarge/tupago3-sdk-go/client/rest"
 	"github.com/omarge/tupago3-sdk-go/errors"
 	"github.com/omarge/tupago3-sdk-go/internal/rpcstats"
@@ -144,10 +145,19 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 		if u, perr := url.Parse(cfg.REST.BaseURL); perr == nil && u.Host != "" {
 			secTarget = u.Host
 		}
+		// Scheme/TLS authority law (P0-HTTP-04). Defense in depth with rest.NewTransport:
+		// security is derived from the ACTUAL URL scheme+host, never from cfg.TLS alone.
+		if err := transportutil.ValidateSchemeTLS(cfg.REST.BaseURL, cfg.TLS, cfg.Insecure); err != nil {
+			return nil, errors.NewConfigError("REST", err.Error())
+		}
 	}
 	if cfg.Transport == "graphql" && cfg.GraphQL != nil && cfg.GraphQL.EndpointURL != "" {
 		if u, perr := url.Parse(cfg.GraphQL.EndpointURL); perr == nil && u.Host != "" {
 			secTarget = u.Host
+		}
+		// Scheme/TLS authority law (P0-HTTP-04). Defense in depth with graphql.NewTransport.
+		if err := transportutil.ValidateSchemeTLS(cfg.GraphQL.EndpointURL, cfg.TLS, cfg.Insecure); err != nil {
+			return nil, errors.NewConfigError("GraphQL", err.Error())
 		}
 	}
 

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/omarge/tupago3-sdk-go/auth"
+	"github.com/omarge/tupago3-sdk-go/client/internal/transportutil"
 	sdkerrors "github.com/omarge/tupago3-sdk-go/errors"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
 	"github.com/omarge/tupago3-sdk-go/security"
@@ -88,7 +89,9 @@ type Transport struct {
 // NewTransport builds a REST Transport. The *http.Client is ALWAYS constructed by
 // the SDK from the TLS/Insecure configuration with a fail-closed redirect policy
 // (no automatic following) so the SDK stays authoritative for destination, TLS and
-// financial send tracking (P0-HTTP-02/03).
+// financial send tracking (P0-HTTP-02/03). The scheme/TLS authority law
+// (P0-HTTP-04) is enforced HERE so a direct caller of rest.NewTransport cannot
+// bypass the security gate that client.NewClient also applies.
 func NewTransport(o *Options) (*Transport, error) {
 	if o == nil {
 		return nil, sdkerrors.NewConfigError("REST", "nil options")
@@ -96,6 +99,11 @@ func NewTransport(o *Options) (*Transport, error) {
 	base := strings.TrimRight(o.BaseURL, "/")
 	if base == "" {
 		return nil, sdkerrors.NewConfigError("REST", "BaseURL is required")
+	}
+	// Scheme/TLS authority law. Security is derived from the ACTUAL URL scheme+host,
+	// never from cfg.TLS alone (P0-HTTP-04). Defense in depth with client.NewClient.
+	if err := transportutil.ValidateSchemeTLS(base, o.TLS, o.Insecure); err != nil {
+		return nil, sdkerrors.NewConfigError("REST", err.Error())
 	}
 	routes := DefaultRoutes()
 	if o.Routes != nil {
@@ -120,8 +128,10 @@ func NewTransport(o *Options) (*Transport, error) {
 	}
 
 	tr := &http.Transport{}
-	if o.TLS != nil && o.TLS.Config != nil {
-		tr.TLSClientConfig = o.TLS.Config
+	// Defensive ownership: clone the caller-supplied TLS config so later mutation of
+	// the original *tls.Config cannot downgrade the already-constructed transport.
+	if cloned := transportutil.CloneTLSConfig(o.TLS); cloned != nil {
+		tr.TLSClientConfig = cloned
 	}
 	hc := &http.Client{
 		Transport: tr,
@@ -191,13 +201,14 @@ func (s *sentTracker) trace() *httptrace.ClientTrace {
 func (s *sentTracker) wrote() bool { return s.wroteRequest.Load() }
 
 // do executes a request. It returns the response, the response body bytes, a
-// network error (nil on HTTP-level response), and whether the request bytes were
-// placed on the wire (authoritative, via httptrace), used for the UnknownOutcome
-// vs request-not-sent classification.
-func (t *Transport) do(ctx context.Context, method, path, idempotencyKey string, body []byte) (*http.Response, []byte, error, bool) {
+// network error (nil on an HTTP-level response), a body-read error (nil when the
+// full body was read), and whether the request bytes were placed on the wire
+// (authoritative, via httptrace), used for the UnknownOutcome vs request-not-sent
+// classification.
+func (t *Transport) do(ctx context.Context, method, path, idempotencyKey string, body []byte) (*http.Response, []byte, error, error, bool) {
 	req, err := t.newReq(ctx, method, path, idempotencyKey, body)
 	if err != nil {
-		return nil, nil, err, false
+		return nil, nil, err, nil, false
 	}
 	var sent sentTracker
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), sent.trace()))
@@ -208,11 +219,19 @@ func (t *Transport) do(ctx context.Context, method, path, idempotencyKey string,
 		// server, which may have accepted/reserved/submitted the payment. The only
 		// safe classification is UnknownOutcome (sent). request-not-sent is reserved
 		// for the objective pre-dispatch case where WroteRequest never fired.
-		return nil, nil, netErr, sent.wrote()
+		return nil, nil, netErr, nil, sent.wrote()
 	}
 	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
-	return resp, rb, nil, sent.wrote()
+	rb, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		// Headers were received but the body could not be completely read (truncated
+		// chunked response, unexpected EOF, connection reset mid-body). The server may
+		// already have processed a financial create, so the outcome is not safely
+		// known. The caller must treat this as UnknownOutcome (create) or a transient
+		// read failure (reads). (P0-HTTP-06)
+		return resp, nil, nil, readErr, sent.wrote()
+	}
+	return resp, rb, nil, nil, sent.wrote()
 }
 
 func truncate(s string, n int) string {
@@ -269,11 +288,16 @@ func (t *Transport) readError(op string, resp *http.Response, body []byte) error
 }
 
 func (t *Transport) createError(op string, resp *http.Response, body []byte, sent bool) error {
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// The create POST reached the origin; a 3xx does NOT prove the origin performed
+		// no financial effect before returning the redirect. Fail closed to
+		// UnknownOutcome (reconcile). No auto-follow, no auto-resend. (P0-HTTP-04/13)
+		msg := fmt.Sprintf("HTTP %d: create received redirect (no-follow), outcome indeterminate: %s",
+			resp.StatusCode, truncate(string(body), 200))
+		return sdkerrors.MapCreateError(status.Error(codes.Unknown, msg), op, true)
+	}
 	code := httpStatusToCode(resp.StatusCode)
 	msg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 256))
-	if code == codes.OK {
-		return nil
-	}
 	se := status.Error(code, msg)
 	if code == codes.Aborted {
 		se = status.Error(codes.Aborted, sdkerrors.PendingReconciliationMarker+": "+msg)
@@ -383,9 +407,12 @@ func (t *Transport) GetCliente(ctx context.Context, req *v1.GetClienteRequest) (
 
 func (t *Transport) getClienteDTO(ctx context.Context, id int64) (*clienteDTO, error) {
 	path := t.routes.GetCliente + strconv.FormatInt(id, 10)
-	resp, body, netErr, _ := t.do(ctx, http.MethodGet, path, "", nil)
+	resp, body, netErr, readErr, _ := t.do(ctx, http.MethodGet, path, "", nil)
 	if netErr != nil {
 		return nil, t.netReadError("GetCliente", netErr)
+	}
+	if readErr != nil {
+		return nil, t.netReadError("GetCliente", readErr)
 	}
 	if e := t.readError("GetCliente", resp, body); e != nil {
 		return nil, e
@@ -413,9 +440,12 @@ func (t *Transport) GetCatalogo(ctx context.Context, req *v1.GetCatalogoRequest)
 
 func (t *Transport) getCatalogoByClave(ctx context.Context, clave string) (*v1.CatalogoInstitucion, error) {
 	path := t.routes.GetCatalogo + url.PathEscape(clave)
-	resp, body, netErr, _ := t.do(ctx, http.MethodGet, path, "", nil)
+	resp, body, netErr, readErr, _ := t.do(ctx, http.MethodGet, path, "", nil)
 	if netErr != nil {
 		return nil, t.netReadError("GetCatalogo", netErr)
+	}
+	if readErr != nil {
+		return nil, t.netReadError("GetCatalogo", readErr)
 	}
 	if e := t.readError("GetCatalogo", resp, body); e != nil {
 		return nil, e
@@ -448,9 +478,12 @@ func (t *Transport) GetQrStatus(ctx context.Context, req *v1.GetStatusRequest) (
 		return nil, invalidArg("GetQrStatus", "nil request")
 	}
 	body, _ := json.Marshal(qrStatusBody{Idc: req.Idc, IDCuenta: i64(req.IdCuenta)})
-	resp, rb, netErr, _ := t.do(ctx, http.MethodPost, t.routes.GetQrStatus, "", body)
+	resp, rb, netErr, readErr, _ := t.do(ctx, http.MethodPost, t.routes.GetQrStatus, "", body)
 	if netErr != nil {
 		return nil, t.netReadError("GetQrStatus", netErr)
+	}
+	if readErr != nil {
+		return nil, t.netReadError("GetQrStatus", readErr)
 	}
 	if e := t.readError("GetQrStatus", resp, rb); e != nil {
 		return nil, e
@@ -464,9 +497,12 @@ func (t *Transport) GetTelefonicoStatus(ctx context.Context, req *v1.GetStatusRe
 		return nil, invalidArg("GetTelefonicoStatus", "nil request")
 	}
 	body, _ := json.Marshal(telStatusBody{IDCuenta: i64(req.IdCuenta), IDMsjdeCobro: req.Idc})
-	resp, rb, netErr, _ := t.do(ctx, http.MethodPost, t.routes.GetTelefonicoStatus, "", body)
+	resp, rb, netErr, readErr, _ := t.do(ctx, http.MethodPost, t.routes.GetTelefonicoStatus, "", body)
 	if netErr != nil {
 		return nil, t.netReadError("GetTelefonicoStatus", netErr)
+	}
+	if readErr != nil {
+		return nil, t.netReadError("GetTelefonicoStatus", readErr)
 	}
 	if e := t.readError("GetTelefonicoStatus", resp, rb); e != nil {
 		return nil, e
@@ -493,9 +529,14 @@ func (t *Transport) CreateQr(ctx context.Context, req *v1.CreateQrRequest) (*v1.
 		TipoPago:           req.TipoPago,
 		Vigencia:           req.Vigencia,
 	})
-	resp, rb, netErr, sent := t.do(ctx, http.MethodPost, t.routes.CreateQr, req.IdempotencyKey, body)
+	resp, rb, netErr, readErr, sent := t.do(ctx, http.MethodPost, t.routes.CreateQr, req.IdempotencyKey, body)
 	if netErr != nil {
 		return nil, t.netCreateError("CreateQr", netErr, sent)
+	}
+	if readErr != nil {
+		// Request was placed on the wire but the response body could not be read
+		// completely: the financial outcome is not safely known. UnknownOutcome.
+		return nil, t.netCreateError("CreateQr", readErr, sent)
 	}
 	if e := t.createError("CreateQr", resp, rb, true); e != nil {
 		return nil, e
@@ -528,9 +569,12 @@ func (t *Transport) CreateTelefonico(ctx context.Context, req *v1.CreateTelefoni
 		NumeroCelular:      num,
 		Vigencia:           req.Vigencia,
 	})
-	resp, rb, netErr, sent := t.do(ctx, http.MethodPost, t.routes.CreateTelefonico, req.IdempotencyKey, body)
+	resp, rb, netErr, readErr, sent := t.do(ctx, http.MethodPost, t.routes.CreateTelefonico, req.IdempotencyKey, body)
 	if netErr != nil {
 		return nil, t.netCreateError("CreateTelefonico", netErr, sent)
+	}
+	if readErr != nil {
+		return nil, t.netCreateError("CreateTelefonico", readErr, sent)
 	}
 	if e := t.createError("CreateTelefonico", resp, rb, true); e != nil {
 		return nil, e

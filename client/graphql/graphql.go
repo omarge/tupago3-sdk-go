@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/omarge/tupago3-sdk-go/auth"
+	"github.com/omarge/tupago3-sdk-go/client/internal/transportutil"
 	sdkerrors "github.com/omarge/tupago3-sdk-go/errors"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
 	"github.com/omarge/tupago3-sdk-go/security"
@@ -83,7 +84,9 @@ type Transport struct {
 // NewTransport builds a GraphQL Transport. The *http.Client is ALWAYS constructed by
 // the SDK from the TLS/Insecure configuration with a fail-closed redirect policy (no
 // automatic following) so the SDK stays authoritative for destination, TLS and
-// financial send tracking (P0-HTTP-02/03).
+// financial send tracking (P0-HTTP-02/03). The scheme/TLS authority law (P0-HTTP-04)
+// is enforced HERE so a direct caller of graphql.NewTransport cannot bypass the
+// security gate that client.NewClient also applies.
 func NewTransport(o *Options) (*Transport, error) {
 	if o == nil {
 		return nil, sdkerrors.NewConfigError("GraphQL", "nil options")
@@ -91,6 +94,11 @@ func NewTransport(o *Options) (*Transport, error) {
 	base := strings.TrimRight(o.BaseURL, "/")
 	if base == "" {
 		return nil, sdkerrors.NewConfigError("GraphQL", "BaseURL is required")
+	}
+	// Scheme/TLS authority law. Security is derived from the ACTUAL URL scheme+host,
+	// never from cfg.TLS alone (P0-HTTP-04). Defense in depth with client.NewClient.
+	if err := transportutil.ValidateSchemeTLS(base, o.TLS, o.Insecure); err != nil {
+		return nil, sdkerrors.NewConfigError("GraphQL", err.Error())
 	}
 	endpoint := o.Endpoint
 	if endpoint == "" {
@@ -101,8 +109,10 @@ func NewTransport(o *Options) (*Transport, error) {
 	}
 
 	tr := &http.Transport{}
-	if o.TLS != nil && o.TLS.Config != nil {
-		tr.TLSClientConfig = o.TLS.Config
+	// Defensive ownership: clone the caller-supplied TLS config so later mutation of
+	// the original *tls.Config cannot downgrade the already-constructed transport.
+	if cloned := transportutil.CloneTLSConfig(o.TLS); cloned != nil {
+		tr.TLSClientConfig = cloned
 	}
 	hc := &http.Client{
 		Transport: tr,
@@ -155,28 +165,29 @@ func truncate(s string, n int) string {
 
 // call executes a GraphQL-over-HTTP POST. It returns the response, the response
 // body bytes, whether the request bytes were placed on the wire (authoritative, via
-// httptrace), and a network error (nil on an HTTP-level response).
-func (t *Transport) call(ctx context.Context, opName, query string, vars map[string]interface{}) (*http.Response, []byte, bool, error) {
+// httptrace), a network error (nil on an HTTP-level response), and a body-read error
+// (nil when the full body was read).
+func (t *Transport) call(ctx context.Context, opName, query string, vars map[string]interface{}) (*http.Response, []byte, bool, error, error) {
 	payload := gqlRequest{OperationName: opName, Query: query, Variables: vars}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, err, nil
 	}
 	req, err := http.NewRequest(http.MethodPost, t.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, err, nil
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 	if t.creds == nil {
-		return nil, nil, false, sdkerrors.NewConfigError("Credentials", "a TokenProvider is required (fail-closed)")
+		return nil, nil, false, sdkerrors.NewConfigError("Credentials", "a TokenProvider is required (fail-closed)"), nil
 	}
 	tok, e := t.creds.Token(ctx)
 	if e != nil {
-		return nil, nil, false, sdkerrors.NewConfigError("Credentials", "token provider error: "+e.Error())
+		return nil, nil, false, sdkerrors.NewConfigError("Credentials", "token provider error: "+e.Error()), nil
 	}
 	if tok == "" {
-		return nil, nil, false, sdkerrors.NewConfigError("Credentials", "empty bearer token (fail-closed)")
+		return nil, nil, false, sdkerrors.NewConfigError("Credentials", "empty bearer token (fail-closed)"), nil
 	}
 	// Token is never written to any log.
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -187,11 +198,15 @@ func (t *Transport) call(ctx context.Context, opName, query string, vars map[str
 	if netErr != nil {
 		// A generic network error after the request may have reached the server is
 		// conservatively classified as sent (UnknownOutcome), never request-not-sent.
-		return nil, nil, sent.wrote(), netErr
+		return nil, nil, sent.wrote(), netErr, nil
 	}
 	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
-	return resp, rb, sent.wrote(), nil
+	rb, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		// Headers received but body incomplete: outcome not safely known (P0-HTTP-06).
+		return resp, nil, sent.wrote(), nil, readErr
+	}
+	return resp, rb, sent.wrote(), nil, nil
 }
 
 func httpStatusToCode(sc int) codes.Code {
@@ -228,12 +243,18 @@ func httpStatusToCode(sc int) codes.Code {
 }
 
 func (t *Transport) errorFromHTTP(op string, resp *http.Response, body []byte, isCreate bool) error {
+	if isCreate && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// The create POST reached the origin; a 3xx does NOT prove the origin performed
+		// no financial effect before returning the redirect. Fail closed to
+		// UnknownOutcome (reconcile). No follow, no resend. (P0-HTTP-04/13)
+		msg := fmt.Sprintf("HTTP %d: create received redirect (no-follow), outcome indeterminate: %s",
+			resp.StatusCode, truncate(string(body), 200))
+		return sdkerrors.MapCreateError(status.Error(codes.Unknown, msg), op, true)
+	}
 	code := httpStatusToCode(resp.StatusCode)
 	msg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 256))
 	se := status.Error(code, msg)
 	if isCreate {
-		// For a create, a non-2xx transport response means the request bytes were
-		// placed on the wire (request was sent), so classify definitively.
 		return sdkerrors.MapCreateError(se, op, true)
 	}
 	return sdkerrors.MapRPCError(se, op)
@@ -406,11 +427,14 @@ func (t *Transport) GetCliente(ctx context.Context, req *v1.GetClienteRequest) (
 	if req == nil {
 		return nil, invalidArg("GetCliente", "nil request")
 	}
-	resp, body, sent, netErr := t.call(ctx, opCliente, queryCliente, map[string]interface{}{
+	resp, body, sent, netErr, readErr := t.call(ctx, opCliente, queryCliente, map[string]interface{}{
 		"id": strconv.FormatInt(req.Id, 10),
 	})
 	if netErr != nil {
 		return nil, netErrToOp("GetCliente", netErr, false, sent)
+	}
+	if readErr != nil {
+		return nil, netErrToOp("GetCliente", readErr, false, sent)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, t.errorFromHTTP("GetCliente", resp, body, false)
@@ -455,11 +479,14 @@ func (t *Transport) GetCatalogo(ctx context.Context, req *v1.GetCatalogoRequest)
 	if req.ClaveInstitucion == "" {
 		return nil, invalidArg("GetCatalogo", "clave_institucion is required")
 	}
-	resp, body, sent, netErr := t.call(ctx, opCatalogo, queryCatalogo, map[string]interface{}{
+	resp, body, sent, netErr, readErr := t.call(ctx, opCatalogo, queryCatalogo, map[string]interface{}{
 		"claveInstitucion": req.ClaveInstitucion,
 	})
 	if netErr != nil {
 		return nil, netErrToOp("GetCatalogo", netErr, false, sent)
+	}
+	if readErr != nil {
+		return nil, netErrToOp("GetCatalogo", readErr, false, sent)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, t.errorFromHTTP("GetCatalogo", resp, body, false)
@@ -490,12 +517,15 @@ func (t *Transport) GetQrStatus(ctx context.Context, req *v1.GetStatusRequest) (
 	if req == nil {
 		return nil, invalidArg("GetQrStatus", "nil request")
 	}
-	resp, body, sent, netErr := t.call(ctx, opQrStatus, queryQrStatus, map[string]interface{}{
+	resp, body, sent, netErr, readErr := t.call(ctx, opQrStatus, queryQrStatus, map[string]interface{}{
 		"idc":      req.Idc,
 		"idCuenta": idString(req.IdCuenta),
 	})
 	if netErr != nil {
 		return nil, netErrToOp("GetQrStatus", netErr, false, sent)
+	}
+	if readErr != nil {
+		return nil, netErrToOp("GetQrStatus", readErr, false, sent)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, t.errorFromHTTP("GetQrStatus", resp, body, false)
@@ -512,12 +542,15 @@ func (t *Transport) GetTelefonicoStatus(ctx context.Context, req *v1.GetStatusRe
 	if req == nil {
 		return nil, invalidArg("GetTelefonicoStatus", "nil request")
 	}
-	resp, body, sent, netErr := t.call(ctx, opTelStatus, queryTelStatus, map[string]interface{}{
+	resp, body, sent, netErr, readErr := t.call(ctx, opTelStatus, queryTelStatus, map[string]interface{}{
 		"idc":      req.Idc,
 		"idCuenta": idString(req.IdCuenta),
 	})
 	if netErr != nil {
 		return nil, netErrToOp("GetTelefonicoStatus", netErr, false, sent)
+	}
+	if readErr != nil {
+		return nil, netErrToOp("GetTelefonicoStatus", readErr, false, sent)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, t.errorFromHTTP("GetTelefonicoStatus", resp, body, false)
@@ -548,12 +581,17 @@ func (t *Transport) CreateQr(ctx context.Context, req *v1.CreateQrRequest) (*v1.
 		"tipoPago":           req.TipoPago,
 		"vigencia":           req.Vigencia,
 	}
-	resp, body, sent, netErr := t.call(ctx, opCreateQr, mutationCreateQr, map[string]interface{}{
+	resp, body, sent, netErr, readErr := t.call(ctx, opCreateQr, mutationCreateQr, map[string]interface{}{
 		"input":          input,
 		"idempotencyKey": req.IdempotencyKey,
 	})
 	if netErr != nil {
 		return nil, netErrToOp("CreateQr", netErr, true, sent)
+	}
+	if readErr != nil {
+		// Request was placed on the wire but the response body could not be read
+		// completely: the financial outcome is not safely known. UnknownOutcome.
+		return nil, netErrToOp("CreateQr", readErr, true, sent)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, t.errorFromHTTP("CreateQr", resp, body, true)
@@ -589,12 +627,15 @@ func (t *Transport) CreateTelefonico(ctx context.Context, req *v1.CreateTelefoni
 		"numeroCelular":      celular,
 		"vigencia":           req.Vigencia,
 	}
-	resp, body, sent, netErr := t.call(ctx, opCreateTel, mutationCreateTel, map[string]interface{}{
+	resp, body, sent, netErr, readErr := t.call(ctx, opCreateTel, mutationCreateTel, map[string]interface{}{
 		"input":          input,
 		"idempotencyKey": req.IdempotencyKey,
 	})
 	if netErr != nil {
 		return nil, netErrToOp("CreateTelefonico", netErr, true, sent)
+	}
+	if readErr != nil {
+		return nil, netErrToOp("CreateTelefonico", readErr, true, sent)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, t.errorFromHTTP("CreateTelefonico", resp, body, true)

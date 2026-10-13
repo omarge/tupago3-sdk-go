@@ -55,6 +55,7 @@ func newGQL(t *testing.T, h func(w http.ResponseWriter, r *http.Request)) (*fake
 func newTransport(t *testing.T, srv *httptest.Server, token string) *graphql.Transport {
 	tr, err := graphql.NewTransport(&graphql.Options{
 		BaseURL:     srv.URL,
+		Insecure:    true, // loopback plaintext permitted
 		Credentials: auth.StaticTokenProvider(token),
 	})
 	require.NoError(t, err)
@@ -94,7 +95,7 @@ func TestGraphQL_CreateQr_Success(t *testing.T) {
 
 func TestGraphQL_CreateQr_NoToken_FailClosed(t *testing.T) {
 	_, srv := newGQL(t, func(w http.ResponseWriter, r *http.Request) {})
-	tr, err := graphql.NewTransport(&graphql.Options{BaseURL: srv.URL}) // no credentials
+	tr, err := graphql.NewTransport(&graphql.Options{BaseURL: srv.URL, Insecure: true}) // no credentials
 	require.NoError(t, err)
 	_, err = tr.CreateQr(context.Background(), &v1.CreateQrRequest{IdempotencyKey: "k"})
 	require.Error(t, err)
