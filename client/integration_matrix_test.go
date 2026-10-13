@@ -15,8 +15,8 @@ import (
 	"github.com/omarge/tupago3-sdk-go/auth"
 	"github.com/omarge/tupago3-sdk-go/client"
 	"github.com/omarge/tupago3-sdk-go/errors"
-	"github.com/omarge/tupago3-sdk-go/security"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
+	"github.com/omarge/tupago3-sdk-go/security"
 )
 
 // TestBackend3F03Matrix runs the full F03-R3 positive+negative read matrix for
@@ -61,10 +61,10 @@ func TestBackend3F03Matrix(t *testing.T) {
 	ctx := context.Background()
 	buildCreds := func(tok string) *client.Config {
 		return &client.Config{
-			Target:          addr,
-			ConnectTimeout:  5 * time.Second,
-			TLS:             tlsCfg,
-			Credentials:     auth.StaticTokenProvider(tok),
+			Target:         addr,
+			ConnectTimeout: 5 * time.Second,
+			TLS:            tlsCfg,
+			Credentials:    auth.StaticTokenProvider(tok),
 		}
 	}
 

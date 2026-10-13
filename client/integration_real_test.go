@@ -21,8 +21,8 @@ import (
 	"github.com/omarge/tupago3-sdk-go/auth"
 	"github.com/omarge/tupago3-sdk-go/client"
 	"github.com/omarge/tupago3-sdk-go/errors"
-	"github.com/omarge/tupago3-sdk-go/security"
 	v1 "github.com/omarge/tupago3-sdk-go/proto/tupago/api/v1"
+	"github.com/omarge/tupago3-sdk-go/security"
 )
 
 // forgeHS512JWT builds a synthetic HS512 JWT from a base64-encoded secret. The
