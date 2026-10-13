@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/omarge/tupago3-sdk-go/auth"
+	"github.com/omarge/tupago3-sdk-go/client/graphql"
 	"github.com/omarge/tupago3-sdk-go/client/rest"
 	"github.com/omarge/tupago3-sdk-go/errors"
 	"github.com/omarge/tupago3-sdk-go/internal/rpcstats"
@@ -77,13 +78,30 @@ type Config struct {
 	Insecure bool
 
 	// Transport selects the wire protocol. "" or "grpc" use the gRPC peer adapter
-	// (default). "rest" uses the REST/JSON peer adapter and requires REST to be set.
-	// Both adapters implement the same six capabilities and return the identical
-	// typed results and error model.
+	// (default). "rest" uses the REST/JSON peer adapter (requires REST). "graphql"
+	// uses the GraphQL peer adapter (requires GraphQL). All adapters implement the
+	// same six capabilities and return the identical typed results and error model.
 	Transport string
 
 	// REST configures the REST/JSON transport. Required when Transport == "rest".
 	REST *RESTOptions
+
+	// GraphQL configures the GraphQL transport. Required when Transport == "graphql".
+	GraphQL *GraphQLOptions
+}
+
+// GraphQLOptions configures the GraphQL peer adapter (see client/graphql).
+type GraphQLOptions struct {
+	// EndpointURL is the backend origin, e.g. "https://pay.tupago.mx" or
+	// "http://127.0.0.1:8080" for an isolated loopback lab.
+	EndpointURL string
+
+	// Endpoint is the GraphQL path (default "/graphql").
+	Endpoint string
+
+	// HTTPClient overrides the default *http.Client (e.g. for proxying/testing).
+	// When nil, one is built from the client TLS/Insecure configuration.
+	HTTPClient *http.Client
 }
 
 // RESTOptions configures the REST/JSON peer adapter (see client/rest).
@@ -125,13 +143,19 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 	}
 	tlsEnabled := cfg.TLS != nil
 
-	// For the REST transport the actual wire endpoint is REST.BaseURL; resolve the
-	// security/loopback target from it so plaintext-only-on-loopback is enforced
-	// against the real destination, not the (unused) gRPC Target.
+	// For the REST/GraphQL transports the actual wire endpoint is REST.BaseURL /
+	// GraphQL.EndpointURL; resolve the security/loopback target from it so
+	// plaintext-only-on-loopback is enforced against the real destination, not the
+	// (unused) gRPC Target.
 	useREST := cfg.Transport == "rest" || (cfg.Transport == "" && cfg.REST != nil)
 	secTarget := cfg.Target
 	if useREST && cfg.REST != nil && cfg.REST.BaseURL != "" {
 		if u, perr := url.Parse(cfg.REST.BaseURL); perr == nil && u.Host != "" {
+			secTarget = u.Host
+		}
+	}
+	if cfg.Transport == "graphql" && cfg.GraphQL != nil && cfg.GraphQL.EndpointURL != "" {
+		if u, perr := url.Parse(cfg.GraphQL.EndpointURL); perr == nil && u.Host != "" {
 			secTarget = u.Host
 		}
 	}
@@ -161,6 +185,32 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 	if !plaintextAllowed && !tlsEnabled {
 		return nil, errors.NewConfigError("TLS",
 			"explicit TLS is required: provide cfg.TLS (loopback plaintext is only permitted when Insecure:true is set explicitly)")
+	}
+
+	// GraphQL transport branch.
+	if cfg.Transport == "graphql" {
+		if cfg.Credentials == nil {
+			return nil, errors.NewConfigError("Credentials", "a TokenProvider is required for the GraphQL transport (fail-closed)")
+		}
+		if cfg.GraphQL == nil || cfg.GraphQL.EndpointURL == "" {
+			return nil, errors.NewConfigError("GraphQL", "GraphQL.EndpointURL is required when Transport=graphql")
+		}
+		tr, err := graphql.NewTransport(&graphql.Options{
+			BaseURL:     cfg.GraphQL.EndpointURL,
+			Endpoint:    cfg.GraphQL.Endpoint,
+			HTTPClient:  cfg.GraphQL.HTTPClient,
+			TLS:         cfg.TLS,
+			Insecure:    cfg.Insecure,
+			Credentials: cfg.Credentials,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &PaymentClient{
+			transport: tr,
+			cfg:       cfg,
+			tracker:   rpcstats.NewTracker(),
+		}, nil
 	}
 
 	// REST/JSON transport branch.

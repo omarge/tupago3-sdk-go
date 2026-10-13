@@ -8,7 +8,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -232,4 +234,71 @@ func TestConsumerVerifiesSDK_REST(t *testing.T) {
 	assert.Equal(t, int32(before+1), atomic.LoadInt32(&calls), "REST CreateQr must be attempted exactly once")
 	assert.Equal(t, "idem-1", lastIdem, "REST idempotency key preserved verbatim")
 	assert.Equal(t, "Bearer tok", lastAuth, "REST bearer token propagated")
+}
+
+// TestConsumerVerifiesSDK_GraphQL is the GraphQL transport consumer certification.
+// It builds the client from the public API only (Transport="graphql") against an
+// in-process fake backend3 GraphQL endpoint and asserts the same contract:
+// NOT_FOUND on a read, exactly-once CreateQr with the idempotency key preserved
+// verbatim, and Bearer propagation. This proves the independent consumer consumes
+// the GraphQL transport.
+func TestConsumerVerifiesSDK_GraphQL(t *testing.T) {
+	var calls int32
+	var lastAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		lastAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			body, _ := io.ReadAll(r.Body)
+			var q struct {
+				OperationName string `json:"operationName"`
+			}
+			_ = json.Unmarshal(body, &q)
+			switch q.OperationName {
+			case "createPagoQr":
+				_, _ = w.Write([]byte(`{"data":{"createPagoQr":{"qr":"https://pay.tupago/qr/g"}}}`))
+		case "catalogoInstitucion":
+			var vars struct {
+				ClaveInstitucion string `json:"claveInstitucion"`
+			}
+			_ = json.Unmarshal(body, &vars)
+			if vars.ClaveInstitucion == "BCM" {
+				_, _ = w.Write([]byte(`{"data":{"catalogoInstitucion":{"id":"7","claveInstitucion":"BCM","nombreCorto":"Banco"}}}`))
+			} else {
+				// backend3 returns null data for an unknown clave (NOT_FOUND)
+				_, _ = w.Write([]byte(`{"data":{"catalogoInstitucion":null}}`))
+			}
+			default:
+				_, _ = w.Write([]byte(`{"data":null,"errors":[{"message":"NOT_FOUND","extensions":{"code":"NOT_FOUND","classification":"not_found"}}]}`))
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.NewClient(context.Background(), &client.Config{
+		Target:      srv.URL,
+		Insecure:    true, // loopback plaintext permitted
+		Transport:   "graphql",
+		Credentials: auth.StaticTokenProvider("tok"),
+		GraphQL:     &client.GraphQLOptions{EndpointURL: srv.URL},
+	})
+	require.NoError(t, err)
+	defer c.Close()
+
+	// NOT_FOUND on a read (default path returns errors array).
+	_, err = c.GetCatalogo(context.Background(), &v1.GetCatalogoRequest{ClaveInstitucion: "X"})
+	require.Error(t, err)
+	assert.True(t, errors.HasGRPCCode(err, codes.NotFound), "GraphQL consumer must see NOT_FOUND")
+
+	// CreateQr success: exactly one attempt, bearer preserved.
+	before := atomic.LoadInt32(&calls)
+	qr, err := c.CreateQr(context.Background(), &v1.CreateQrRequest{IdCuenta: 1, Monto: 10, IdempotencyKey: "idem-gql"})
+	require.NoError(t, err)
+	assert.Equal(t, `{"qr":"https://pay.tupago/qr/g"}`, qr.Json)
+	assert.Equal(t, int32(before+1), atomic.LoadInt32(&calls), "GraphQL CreateQr must be attempted exactly once")
+	assert.Equal(t, "Bearer tok", lastAuth, "GraphQL bearer token propagated")
 }

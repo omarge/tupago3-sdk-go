@@ -59,9 +59,10 @@ func main() {
 		ConnectTimeout: 10 * time.Second,
 	}
 
-	// TUPAGO_TRANSPORT selects the wire protocol: "grpc" (default) or "rest".
-	// For "rest" the SDK talks to the REST/JSON backend at TUPAGO_REST_URL
-	// (default https://pay.tupago.mx), reusing the same TLS + Bearer identity.
+	// TUPAGO_TRANSPORT selects the wire protocol: "grpc" (default), "rest", or
+	// "graphql". For "rest"/"graphql" the SDK talks to the corresponding backend at
+	// TUPAGO_REST_URL / TUPAGO_GRAPHQL_URL (default https://pay.tupago.mx),
+	// reusing the same TLS + Bearer identity and returning identical results.
 	if transport := os.Getenv("TUPAGO_TRANSPORT"); transport == "rest" {
 		restURL := os.Getenv("TUPAGO_REST_URL")
 		if restURL == "" {
@@ -70,6 +71,14 @@ func main() {
 		cfg.Transport = "rest"
 		cfg.REST = &client.RESTOptions{BaseURL: restURL}
 		log.Printf("using REST/JSON transport at %s", restURL)
+	} else if transport == "graphql" {
+		gqlURL := os.Getenv("TUPAGO_GRAPHQL_URL")
+		if gqlURL == "" {
+			gqlURL = "https://pay.tupago.mx"
+		}
+		cfg.Transport = "graphql"
+		cfg.GraphQL = &client.GraphQLOptions{EndpointURL: gqlURL}
+		log.Printf("using GraphQL transport at %s", gqlURL)
 	}
 
 	c, err := client.NewClient(context.Background(), cfg)
