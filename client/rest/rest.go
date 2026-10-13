@@ -13,13 +13,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/omarge/tupago3-sdk-go/auth"
@@ -54,10 +55,16 @@ func DefaultRoutes() Routes {
 }
 
 // Options configures the REST transport.
+//
+// The HTTP client is ALWAYS built by the SDK from the supplied TLS/Insecure
+// configuration. A caller-supplied *http.Client is deliberately NOT accepted: an
+// arbitrary client could carry InsecureSkipVerify, a redirect-following policy, a
+// custom RoundTripper, or proxy to an unrelated endpoint, all of which would
+// bypass the SDK-authoritative TLS, redirect and send-tracking controls. This is a
+// fail-closed posture (P0-HTTP-03).
 type Options struct {
-	BaseURL    string
-	Routes     *Routes
-	HTTPClient *http.Client
+	BaseURL string
+	Routes  *Routes
 
 	// TLS, when non-nil, provides the verified TLS configuration (fail-closed;
 	// server certificate verification can never be disabled). Insecure is only
@@ -78,8 +85,10 @@ type Transport struct {
 	hc     *http.Client
 }
 
-// NewTransport builds a REST Transport. If HTTPClient is nil, an *http.Client is
-// constructed from the TLS/Insecure configuration.
+// NewTransport builds a REST Transport. The *http.Client is ALWAYS constructed by
+// the SDK from the TLS/Insecure configuration with a fail-closed redirect policy
+// (no automatic following) so the SDK stays authoritative for destination, TLS and
+// financial send tracking (P0-HTTP-02/03).
 func NewTransport(o *Options) (*Transport, error) {
 	if o == nil {
 		return nil, sdkerrors.NewConfigError("REST", "nil options")
@@ -110,13 +119,19 @@ func NewTransport(o *Options) (*Transport, error) {
 		}
 	}
 
-	hc := o.HTTPClient
-	if hc == nil {
-		tr := &http.Transport{}
-		if o.TLS != nil && o.TLS.Config != nil {
-			tr.TLSClientConfig = o.TLS.Config
-		}
-		hc = &http.Client{Transport: tr, Timeout: 30 * time.Second}
+	tr := &http.Transport{}
+	if o.TLS != nil && o.TLS.Config != nil {
+		tr.TLSClientConfig = o.TLS.Config
+	}
+	hc := &http.Client{
+		Transport: tr,
+		Timeout:   30 * time.Second,
+		// Fail-closed: never automatically follow redirects. A 3xx is returned to
+		// the caller as a non-success response without issuing a second request
+		// (preserves single financial dispatch; no bearer/idempotency leakage).
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	return &Transport{base: base, routes: routes, creds: o.Credentials, hc: hc}, nil
@@ -156,24 +171,48 @@ func (t *Transport) newReq(ctx context.Context, method, path, idempotencyKey str
 	return req, nil
 }
 
+// sentTracker provides authoritative HTTP send tracking: it records whether the
+// request bytes were actually written to the wire (via httptrace.WroteRequest),
+// independent of the Go error returned by http.Client.Do. This is the HTTP analogue
+// of the gRPC rpcstats send tracker and is required to correctly classify financial
+// create outcomes (P0-HTTP-01). If the request was written (or we cannot prove it
+// was not), the conservative financial rule applies: any subsequent failure is an
+// UnknownOutcome (reconcile), NEVER request-not-sent.
+type sentTracker struct {
+	wroteRequest atomic.Bool
+}
+
+func (s *sentTracker) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { s.wroteRequest.Store(true) },
+	}
+}
+
+func (s *sentTracker) wrote() bool { return s.wroteRequest.Load() }
+
 // do executes a request. It returns the response, the response body bytes, a
 // network error (nil on HTTP-level response), and whether the request bytes were
-// sent (used for UnknownOutcome vs request-not-sent classification).
+// placed on the wire (authoritative, via httptrace), used for the UnknownOutcome
+// vs request-not-sent classification.
 func (t *Transport) do(ctx context.Context, method, path, idempotencyKey string, body []byte) (*http.Response, []byte, error, bool) {
 	req, err := t.newReq(ctx, method, path, idempotencyKey, body)
 	if err != nil {
 		return nil, nil, err, false
 	}
+	var sent sentTracker
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), sent.trace()))
 	resp, netErr := t.hc.Do(req)
 	if netErr != nil {
-		// On context cancellation/deadline the request may or may not have been
-		// sent; classify as sent so the financial path forces reconciliation.
-		sent := errors.Is(netErr, context.DeadlineExceeded) || errors.Is(netErr, context.Canceled)
-		return nil, nil, netErr, sent
+		// A generic network error (EOF, connection reset, broken pipe, server closed
+		// after reading the request) may occur AFTER the POST bytes reached the
+		// server, which may have accepted/reserved/submitted the payment. The only
+		// safe classification is UnknownOutcome (sent). request-not-sent is reserved
+		// for the objective pre-dispatch case where WroteRequest never fired.
+		return nil, nil, netErr, sent.wrote()
 	}
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
-	return resp, rb, nil, true
+	return resp, rb, nil, sent.wrote()
 }
 
 func truncate(s string, n int) string {
@@ -189,6 +228,12 @@ func httpStatusToCode(sc int) codes.Code {
 		return codes.Aborted // PendingReconciliation (must precede the 2xx range)
 	case sc >= 200 && sc < 300:
 		return codes.OK
+	case sc >= 300 && sc < 400:
+		// A 3xx reached the SDK only because CheckRedirect is fail-closed
+		// (ErrUseLastResponse): the SDK refuses to follow it, so the server did NOT
+		// process a payment. This is a definite, non-retryable client policy outcome,
+		// not an ambiguous financial UnknownOutcome, and must not trigger a resend.
+		return codes.FailedPrecondition
 	case sc == 400:
 		return codes.InvalidArgument
 	case sc == 401:

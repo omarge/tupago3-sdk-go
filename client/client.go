@@ -19,7 +19,6 @@ package client
 
 import (
 	"context"
-	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -98,10 +97,6 @@ type GraphQLOptions struct {
 
 	// Endpoint is the GraphQL path (default "/graphql").
 	Endpoint string
-
-	// HTTPClient overrides the default *http.Client (e.g. for proxying/testing).
-	// When nil, one is built from the client TLS/Insecure configuration.
-	HTTPClient *http.Client
 }
 
 // RESTOptions configures the REST/JSON peer adapter (see client/rest).
@@ -112,10 +107,6 @@ type RESTOptions struct {
 
 	// Routes overrides individual capability paths. Nil uses backend3 defaults.
 	Routes *rest.Routes
-
-	// HTTPClient overrides the default *http.Client (e.g. for proxying/testing).
-	// When nil, one is built from the client TLS/Insecure configuration.
-	HTTPClient *http.Client
 }
 
 // PaymentClient is a reusable, concurrency-safe TUPAGO3 client.
@@ -198,7 +189,6 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 		tr, err := graphql.NewTransport(&graphql.Options{
 			BaseURL:     cfg.GraphQL.EndpointURL,
 			Endpoint:    cfg.GraphQL.Endpoint,
-			HTTPClient:  cfg.GraphQL.HTTPClient,
 			TLS:         cfg.TLS,
 			Insecure:    cfg.Insecure,
 			Credentials: cfg.Credentials,
@@ -224,7 +214,6 @@ func NewClient(ctx context.Context, cfg *Config) (*PaymentClient, error) {
 		tr, err := rest.NewTransport(&rest.Options{
 			BaseURL:     cfg.REST.BaseURL,
 			Routes:      cfg.REST.Routes,
-			HTTPClient:  cfg.REST.HTTPClient,
 			TLS:         cfg.TLS,
 			Insecure:    cfg.Insecure,
 			Credentials: cfg.Credentials,
