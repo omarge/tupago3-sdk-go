@@ -97,8 +97,11 @@ func TestGraphQL_CreateTelefonico_RequestGetBodyNil_Structural(t *testing.T) {
 }
 
 // P0-HTTP-07 (structural): a GraphQL financial CREATE must not be replayable by net/http.
-// The idempotency travels in the GraphQL variables (not the HTTP Idempotency-Key header),
-// so it was not replayable by default; we additionally null GetBody for defense in depth.
+// GraphQL does NOT send an HTTP Idempotency-Key header (its idempotency travels in the
+// GraphQL variables), so the general Request.isReplayable idempotency-key classification
+// path does not apply. However, on a reused keep-alive connection a nothingWrittenError
+// lets net/http retry a body-bearing request whenever GetBody != nil. The fix nulls
+// GetBody for financial creates, which is therefore REQUIRED, not merely defensive.
 func TestGraphQL_CreateQr_RequestGetBodyNil_Structural(t *testing.T) {
 	tr, err := NewTransport(&Options{
 		BaseURL:     "http://127.0.0.1:8080",

@@ -194,13 +194,17 @@ func (t *Transport) call(ctx context.Context, opName, query string, vars map[str
 
 	// P0-HTTP-07: a financial CREATE must not be transparently replayed by the
 	// standard net/http Transport. The body is built from a *bytes.Reader, so
-	// http.NewRequest auto-populates req.GetBody, which would otherwise make the POST
-	// replayable and could be silently resent by net/http on a reused connection that
-	// fails after the first write (a transparent retry beneath our no-retry policy).
-	// Nulling GetBody makes the request non-replayable while preserving the body,
+	// http.NewRequest auto-populates req.GetBody. On a reused keep-alive connection,
+	// if the first write fails after zero bytes were sent (a nothingWrittenError),
+	// net/http retries the request whenever req.GetBody != nil. This branch is
+	// independent of any HTTP Idempotency-Key header. GraphQL does NOT send an HTTP
+	// Idempotency-Key header (its idempotency travels in the GraphQL variables), so
+	// the general Request.isReplayable idempotency-key classification path does not
+	// apply either — but the nothingWrittenError branch above still makes a
+	// body-bearing request replayable when GetBody != nil. Nulling GetBody therefore
+	// makes the financial-create request non-replayable while preserving the body,
 	// Content-Length and the GraphQL idempotencyKey variable inside the payload.
-	// (GraphQL carries idempotency in the variables, not the HTTP Idempotency-Key
-	// header, so it is not replayable by default; this is defense in depth.)
+	// This is a REQUIRED financial-create invariant, not merely defense in depth.
 	if opName == opCreateQr || opName == opCreateTel {
 		req.GetBody = nil
 	}
