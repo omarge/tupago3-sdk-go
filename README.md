@@ -1,15 +1,17 @@
 # TUPAGO3 SDK — Go
 
-Cliente Go idiomático y thread-safe para el contrato gRPC `tupago.api.v1.PaymentService` de **TUPAGO3**.
+Cliente Go idiomático y thread-safe para el contrato `tupago.api.v1.PaymentService` de **TUPAGO3**.
 
-* Seis RPCs: `GetCliente`, `GetCatalogo`, `GetQrStatus`, `GetTelefonicoStatus`, `CreateQr`, `CreateTelefonico`.
+* Seis capacidades: `GetCliente`, `GetCatalogo`, `GetQrStatus`, `GetTelefonicoStatus`, `CreateQr`, `CreateTelefonico`.
+* Transportes: **gRPC** (default), **REST** y **GraphQL**.
 * TLS verificado con soporte de CA personalizada; plaintext permitido **solo** para loopback.
-* JWT dinámico por RPC (`Authorization: Bearer`), nunca logueado.
-* Retry acotado **solo para lecturas**; `CreateQr`/`CreateTelefonico` son **single-attempt / no-blind-retry**.
-* Errores tipados y detectables (`errors.IsUnknownOutcome`, `errors.IsPendingReconciliation`, etc.).
-* Deadlines/cancellation vía `context.Context`, sin estado global mutable, seguro para uso concurrente.
+* JWT dinámico por llamada (`Authorization: Bearer`), nunca logueado.
+* **Auth fail-closed**: credenciales requeridas por defecto.
+* Retry acotado **solo para lecturas**; creates son **single-attempt / no-blind-retry**.
+* Errores tipados (`errors.IsUnknownOutcome`, `errors.IsPendingReconciliation`, etc.).
+* Deadlines/cancellation vía `context.Context`, seguro para uso concurrente.
 
-> **Invariante financiera:** un `Create` se intenta como máximo una vez. Un error transitorio detectado *después* de que la request pudo haber salido se reporta como `UnknownOutcomeError` (reconciliar, **no** reintentar a ciegas). `TUPAGO_PENDING_RECONCILIATION` se preserva como error no-transitorio detectable.
+> **Invariante financiera:** un `Create` se intenta como máximo una vez. Un error transitorio detectado *después* de que la request pudo haber salido se reporta como `UnknownOutcomeError` (reconciliar, **no** reintentar a ciegas).
 
 ## Instalación
 
@@ -55,9 +57,10 @@ func main() {
 }
 ```
 
-## Estado
+## Transportes
 
-Actualmente solo gRPC. REST y GraphQL están pendientes de implementación alineada con backend3.
+Selecciona el transporte con `Config.Transport` (`"grpc"`, `"rest"`, `"graphql"`).
+REST y GraphQL requieren `Config.REST` / `Config.GraphQL` con la URL base.
 
 ## Licencia
 
