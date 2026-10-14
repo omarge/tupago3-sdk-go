@@ -49,7 +49,7 @@ func DefaultRoutes() Routes {
 		CreateQr:            "/api/payments/msjpagoqrusuario",
 		CreateTelefonico:    "/api/payments/msjpagotelefonicousuario",
 		GetQrStatus:         "/api/payments/estatusmsjqr",
-		GetTelefonicoStatus: "/api/payments/estatusmsjcobrotelefonicousuario",
+		GetTelefonicoStatus: "/api/payments/estatusmsjcobrotelefonico",
 		GetCliente:          "/api/clientes/",
 		GetCatalogo:         "/api/catalogo-institucions/clave/",
 	}
