@@ -219,7 +219,7 @@ func TestREST_GetQrStatus_Success(t *testing.T) {
 
 func TestREST_GetTelefonicoStatus_Success(t *testing.T) {
 	b := newBackend(t)
-	b.expect(t, http.MethodPost, "/api/payments/estatusmsjcobrotelefonicousuario")
+	b.expect(t, http.MethodPost, "/api/payments/estatusmsjcobrotelefonico")
 	b.handler = func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
