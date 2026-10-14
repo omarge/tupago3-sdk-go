@@ -170,7 +170,7 @@ func restConformanceHandler(failReads bool) http.HandlerFunc {
 			_, _ = w.Write([]byte(cfTelPayload))
 		case r.Method == http.MethodPost && hasSuffix(r.URL.Path, "/estatusmsjqr"):
 			_, _ = w.Write([]byte(cfQrStatus))
-		case r.Method == http.MethodPost && hasSuffix(r.URL.Path, "/estatusmsjcobrotelefonicousuario"):
+		case r.Method == http.MethodPost && hasSuffix(r.URL.Path, "/estatusmsjcobrotelefonico"):
 			_, _ = w.Write([]byte(cfTelStatus))
 		default:
 			w.WriteHeader(http.StatusNotFound)
