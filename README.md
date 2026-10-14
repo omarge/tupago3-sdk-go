@@ -121,13 +121,13 @@ package main
 import (
   "context"
   "log"
+  "os"
   "github.com/omarge/tupago3-sdk-go/client"
   "github.com/omarge/tupago3-sdk-go/auth"
-  "github.com/omarge/tupago3-sdk-go/security"
 )
 func main() {
   cfg := &client.Config{Target:"127.0.0.1:9091", Transport:"grpc",
-    Insecure:true, Credentials:auth.NewStaticTokenProvider("LAB_JWT")}
+    Insecure:true, Credentials:auth.StaticTokenProvider(os.Getenv("TUPAGO_JWT"))}
   c, err := client.NewClient(context.Background(), cfg)
   if err != nil { log.Fatal(err) }
   defer c.Close()
