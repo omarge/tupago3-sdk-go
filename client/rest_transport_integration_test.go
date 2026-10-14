@@ -64,7 +64,7 @@ func (b *fakeRESTBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, _ = w.Write([]byte(`[{"status":"ACTIVE","idc":"IDC1"}]`))
-	case r.Method == http.MethodPost && strings.HasSuffix(key, "/estatusmsjcobrotelefonicousuario"):
+	case r.Method == http.MethodPost && strings.HasSuffix(key, "/estatusmsjcobrotelefonico"):
 		_, _ = w.Write([]byte(`{"status":"PAID"}`))
 	case r.Method == http.MethodGet && strings.HasPrefix(key, "/api/clientes/"):
 		_, _ = w.Write([]byte(`{"id":9223372036854775807,"nombre":"Demo","claveInstitucion":"BCM","key":"k1"}`))
