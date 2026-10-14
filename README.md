@@ -1,5 +1,14 @@
 # TUPAGO3 SDK — Go
 
+## Documentation index / Índice de documentación
+
+- [ES — Guía integral paso a paso](#guía-integral-es--implementación-verificable)
+- [EN — Complete step-by-step guide](#complete-guide-en--verified-implementation)
+- [C1–C6 — Contratos / Wire contracts](#c1c6--contratos-wire-y-payloads)
+- [Pruebas / Tests, E2E and deployment](#validación-final--final-acceptance-checklist)
+- [Manual existente / Existing SDK documentation](#implementation-manual--manual-de-implementación)
+
+
 Cliente Go idiomático y thread-safe para el contrato `tupago.api.v1.PaymentService` de **TUPAGO3**.
 
 * Seis capacidades: `GetCliente`, `GetCatalogo`, `GetQrStatus`, `GetTelefonicoStatus`, `CreateQr`, `CreateTelefonico`.
@@ -183,3 +192,106 @@ func main() {
 
 **Estado / Status:** local and read-only E2E certificates cover their **documented transports**, not production financial writes, Banxico/STP external calls, or real Microsoft Office host validation.
 
+
+---
+
+## Guía integral ES — Implementación verificable
+
+**Paso 1 — Preparación.** Obtener autorización para usar backend3, la red permitida, la identidad del comercio y JWT con alcance de propietario. Definir entorno de laboratorio o TLS productivo; **no reutilizar** endpoints de laboratorio en producción. Autoridad contractual: `omarge/tupagoback3` commit `bbf06c02bda06221b2f214075a4bf2bdf3345eb0`.
+
+**Paso 2 — Instalación y versión fija.** From an independent Go module, run `go get github.com/omarge/tupago3-sdk-go@7c5d891296f4fad5d357d44e2861b05be3f1209e`. Do **not** use `replace => /path/to/sdk` as distribution evidence.
+
+**Paso 3 — Configuración.** Elegir el transporte ofrecido por este SDK, configurar endpoint y proveedor de token vía entorno/secret manager, activar verificación TLS para destinos remotos y definir timeouts y reintentos acotados exclusivamente para lecturas. Rechazar credenciales vacías. El token debe determinar ownership en backend3, nunca permitir seleccionar arbitrariamente el propietario.
+
+**Paso 4 — Primera operación real (solo lectura).** Crear el cliente a través de la API pública; consultar primero C6 y C5 con un registro sintético existente del laboratorio. Verificar perfil **compuesto** e identidad del banco. Consultar luego C3 y C4 con IDs sintéticos; aceptar `NOT_FOUND` tipado como resultado negativo previsto, no como pago inexistente confirmado universalmente.
+
+**Paso 5 — Ejemplo adaptado al SDK.**
+
+```go
+// ByCuenta: client is an authenticated, initialized SDK client.
+status, err := c.GetQrStatus(ctx, &v1.GetStatusRequest{
+    Idc: "synthetic-not-found", IdCuenta: 42,
+})
+if err != nil {
+    // Differentiate NOT_FOUND, auth failures and transport failures.
+    return err
+}
+_ = status
+```
+
+**Paso 6 — Operaciones financieras.** C1/C2 son de un intento; conservar `idempotencyKey` original. Tras timeout/corte/5xx/redirección/éxito malformado potencialmente post-envío, tratar como `UnknownOutcome`: **no reenviar**; consultar estatus y reconciliar. `PendingReconciliation` (por ejemplo HTTP 202 autorizado) es un estado distinto. Nunca registrar JWT ni PII.
+
+**Paso 7 — Validar y entregar.** `go test ./... && go test -race ./... && go vet ./...`; verify immutable-version resolution from a separate module and no source-tree replace. Fijar HEAD Git, SHA256 del paquete, resultados del consumidor externo, CI correspondiente al HEAD y reporte inmutable. Certificación E2E de lectura no equivale a autorización para pagos reales.
+
+## Complete guide EN — Verified implementation
+
+**Step 1 — Prerequisites.** Obtain authorized backend3 access, network scope, merchant identity and an owner-scoped JWT. Select an isolated lab or a TLS-secured service; **never copy lab endpoints to production**. Contract authority: `omarge/tupagoback3` at `bbf06c02bda06221b2f214075a4bf2bdf3345eb0`.
+
+**Step 2 — Install a pinned distribution.** From an independent Go module, run `go get github.com/omarge/tupago3-sdk-go@7c5d891296f4fad5d357d44e2861b05be3f1209e`. Do **not** use `replace => /path/to/sdk` as distribution evidence.
+
+**Step 3 — Configure.** Select the SDK's supported transport, set endpoint and dynamic token provider from a secure environment, enforce certificate/hostname checks for remote TLS, apply bounded read-only retry and explicit timeouts. Reject missing credentials; let backend3 enforce ownership.
+
+**Step 4 — First actual read.** Initialize the public API and perform C6/C5 against an existing *synthetic* authorized lab fixture. Confirm the institution is attached to the composed client profile. Probe C3/C4 using synthetic identifiers; treat a typed NOT_FOUND as a valid negative-path observation only.
+
+**Step 5 — SDK example.**
+
+```go
+// ByCuenta: client is an authenticated, initialized SDK client.
+status, err := c.GetQrStatus(ctx, &v1.GetStatusRequest{
+    Idc: "synthetic-not-found", IdCuenta: 42,
+})
+if err != nil {
+    // Differentiate NOT_FOUND, auth failures and transport failures.
+    return err
+}
+_ = status
+```
+
+**Step 6 — Payment safety.** C1/C2 are single-dispatch. Persist the original `idempotencyKey`; a possibly-post-dispatch network timeout, 5xx, redirect or malformed success response is `UnknownOutcome`: **do not replay**. Reconcile using the original key. `PendingReconciliation` (e.g., authoritative HTTP 202) is distinct. Never log JWT or sensitive customer data.
+
+**Step 7 — Test and ship.** `go test ./... && go test -race ./... && go vet ./...`; verify immutable-version resolution from a separate module and no source-tree replace. Record exact Git HEAD, artifact SHA256, independent consumer results, CI run for that HEAD and an immutable certification report. Read-only E2E does not certify real money movement.
+
+## C1–C6 — Contratos wire y payloads
+
+| ID | Operation | REST backend3 | GraphQL | gRPC |
+|---|---|---|---|---|
+| C1 | CreateQr | `POST /api/payments/msjpagoqrusuario` | `createPagoQr` | `CreateQr` |
+| C2 | CreateTelefonico | `POST /api/payments/msjpagotelefonicousuario` | `createPagoTelefonico` | `CreateTelefonico` |
+| C3 | GetQrStatus | `POST /api/payments/estatusmsjqr` | `pagoQrEstatusByCuenta` | `GetQrStatus` |
+| C4 | GetTelefonicoStatus | `POST /api/payments/estatusmsjcobrotelefonico` | `pagoTelefonicoEstatusByCuenta` | `GetTelefonicoStatus` |
+| C5 | GetCliente | `GET /api/clientes/{id}` + catalog lookup | owned-client query | `GetCliente` |
+| C6 | GetCatalogo | `GET /api/catalogo-institucions/clave/{clave}` | `catalogoInstitucion` | `GetCatalogo` |
+
+### Payload examples / Ejemplos de payload (sandbox reads only)
+
+```bash
+# ES: Solo un laboratorio autorizado; no imprimir ni almacenar el token.
+# EN: Authorized lab only; do not print or persist the token.
+export TUPAGO_REST_BASE='https://backend.example.com'
+# Export TUPAGO_JWT securely outside shell history.
+curl -fsS -H "Authorization: Bearer ${TUPAGO_JWT}" \
+  -H 'Content-Type: application/json' \
+  -d '{"idc":"synthetic-id","idCuenta":42}' \
+  "${TUPAGO_REST_BASE}/api/payments/estatusmsjqr"
+curl -fsS -H "Authorization: Bearer ${TUPAGO_JWT}" \
+  -H 'Content-Type: application/json' \
+  -d '{"idCuenta":42,"idMsjdeCobro":"synthetic-id"}' \
+  "${TUPAGO_REST_BASE}/api/payments/estatusmsjcobrotelefonico"
+curl -fsS -H "Authorization: Bearer ${TUPAGO_JWT}" \
+  "${TUPAGO_REST_BASE}/api/clientes/1"
+curl -fsS -H "Authorization: Bearer ${TUPAGO_JWT}" \
+  "${TUPAGO_REST_BASE}/api/catalogo-institucions/clave/301"```
+
+**ES:** En C4, el `idc` público se serializa como `idMsjdeCobro` en REST; en C5, la respuesta `ClienteDTO` se debe enriquecer con el catálogo y devolver `ClientePerfil`. Para C1/C2 usar sólo sandbox financiero aprobado y claves de idempotencia persistidas; **no ejecutar contra producción con datos de ejemplo**.
+
+**EN:** In C4 the public `idc` becomes REST `idMsjdeCobro`. C5 must compose `ClientePerfil` from the owned `ClienteDTO` and the institution lookup. Only run C1/C2 in an approved financial sandbox with durable idempotency keys; **never run payment creates using sample data in production**.
+
+## Validación final — Final acceptance checklist
+
+- [ ] **ES:** Instalar artefacto versionado en consumidor separado. **EN:** Install a pinned package in an independent consumer.
+- [ ] **ES:** Comprobar C3/C4, C5 compuesto y C6 contra backend aislado. **EN:** Verify C3/C4, composed C5 and C6 against isolated backend3.
+- [ ] **ES:** Probar JWT válido, ausente, inválido, vencido y acceso de otro propietario. **EN:** Test valid/missing/invalid/expired JWT and foreign ownership.
+- [ ] **ES:** Verificar SSL/TLS real para destinos remotos y redacción de secretos. **EN:** Verify remote TLS validation and secret redaction.
+- [ ] **ES:** Verificar ausencia de blind retries en C1/C2 sin ejecutar creaciones reales. **EN:** Validate no-blind-retry rules for C1/C2 without real payment creation.
+- [ ] **ES:** Archivar hashes de distribución, HEAD/CI, comandos y conteos exactos. **EN:** Archive distributable hashes, HEAD/CI, commands and exact test totals.
+- [ ] **ES:** Mantener C1/C2 sandbox, Banxico/STP y Office real como gates independientes. **EN:** Keep payment sandbox, Banxico/STP and real Office host as separate gates.
