@@ -444,6 +444,72 @@ func TestFinancialConformance_GraphQL(t *testing.T) {
 	require.Equal(t, int32(0), atomic.LoadInt32(tH), "redirect target receives ZERO requests")
 }
 
+func TestFinancialConformance_HTTP5xxCreateUnknownOutcome(t *testing.T) {
+	for _, transport := range []string{"rest", "graphql"} {
+		t.Run(transport, func(t *testing.T) {
+			var qrCalls, telCalls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if transport == "rest" {
+					switch {
+					case strings.HasSuffix(r.URL.Path, "/msjpagoqrusuario"):
+						atomic.AddInt32(&qrCalls, 1)
+					case strings.HasSuffix(r.URL.Path, "/msjpagotelefonicousuario"):
+						atomic.AddInt32(&telCalls, 1)
+					default:
+						t.Errorf("unexpected REST create route: %s", r.URL.Path)
+					}
+				} else {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read GraphQL request: %v", err)
+					}
+					var q struct {
+						OperationName string `json:"operationName"`
+					}
+					if err := json.Unmarshal(body, &q); err != nil {
+						t.Errorf("decode GraphQL request: %v", err)
+					}
+					switch q.OperationName {
+					case "createPagoQr":
+						atomic.AddInt32(&qrCalls, 1)
+					case "createPagoTelefonico":
+						atomic.AddInt32(&telCalls, 1)
+					default:
+						t.Errorf("unexpected GraphQL operation: %s", q.OperationName)
+					}
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer srv.Close()
+
+			var c *client.PaymentClient
+			if transport == "rest" {
+				c = restFinClient(t, srv.URL)
+			} else {
+				c = graphqlFinClient(t, srv.URL)
+			}
+			defer c.Close()
+
+			_, err := c.CreateQr(context.Background(), &v1.CreateQrRequest{
+				IdCuenta: 1, Monto: 10, IdempotencyKey: "idem-http-5xx-qr",
+			})
+			require.Error(t, err)
+			require.True(t, sdkerrors.IsUnknownOutcome(err), "%s CreateQr 5xx must be UnknownOutcome", transport)
+			require.False(t, sdkerrors.IsRetryable(err))
+
+			_, err = c.CreateTelefonico(context.Background(), &v1.CreateTelefonicoRequest{
+				Key: "k", Monto: 10, NumeroCelular: "5512345678", IdempotencyKey: "idem-http-5xx-tel",
+			})
+			require.Error(t, err)
+			require.True(t, sdkerrors.IsUnknownOutcome(err), "%s CreateTelefonico 5xx must be UnknownOutcome", transport)
+			require.False(t, sdkerrors.IsRetryable(err))
+
+			require.Equal(t, int32(1), atomic.LoadInt32(&qrCalls), "%s CreateQr must be attempted once", transport)
+			require.Equal(t, int32(1), atomic.LoadInt32(&telCalls), "%s CreateTelefonico must be attempted once", transport)
+		})
+	}
+}
+
 // pre-dispatch control across transports: a config error before any wire write is
 // NOT an UnknownOutcome.
 func TestFinancialConformance_PreDispatchNotUnknownOutcome(t *testing.T) {
